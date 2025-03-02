@@ -263,6 +263,8 @@ class InputData:
         """
         self.n_classes = n_classes
         self.labels = self._create_labels()
+        self.data_list = data_list 
+        self.split_fac = split_fac
         self.training_data, self.testing_data = self._split_shuffle_data(data_list, split_fac)
 
     def _create_labels(self):
@@ -279,6 +281,10 @@ class InputData:
             tr_data.append(iter(sub_data[:n_train]))
             te_data.append(iter(sub_data[n_train:]))
         return tr_data, te_data
+
+    def refill_iterators(self):
+        """Refills the training and testing iterators from data_list."""
+        self.training_data, self.testing_data = self._split_shuffle_data(self.data_list, self.split_fac)
 
 
 def compute_soft_maxed_output(ss, output_inds):
