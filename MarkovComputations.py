@@ -11,6 +11,9 @@ from functools import partial
 import timeit
 import random
 import copy
+import tensorflow as tf
+from tensorflow.keras.datasets import mnist
+from sklearn import datasets
 
 
 class WeightMatrix:
@@ -353,6 +356,102 @@ def compute_error(ss, input_data, class_number, output_inds):
     ss_at_outputs = [ss[output_ind] for output_ind in output_inds] 
     true_output = input_data.labels[class_number]
     return np.array(ss_at_outputs - true_output)
+
+
+def downsample_avg(image, m=2):
+    h, w = image.shape
+    assert h % m == 0 and w % m == 0, "Image dimensions must be divisible by m"
+    return image.reshape(h//m, m, w//m, m).mean(axis=(1, 3))
+
+
+def load_and_format_mnist(n_classes, scale, m):
+    # Load the MNIST dataset
+    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+
+    # Normalize pixel values to range [0,1]
+    x_train = scale * (x_train.astype(np.float32) / 255.0 - 0.0)
+    x_test = scale * (x_test.astype(np.float32) / 255.0 - 0.0)
+
+    # Combine train and test sets
+    x_all = np.concatenate((x_train, x_test), axis=0)
+    y_all = np.concatenate((y_train, y_test), axis=0)
+
+    # Initialize an empty dictionary with keys for each digit class (0-9)
+    mnist_dict = {i: [] for i in range(10)}
+
+    # Populate the dictionary
+    for img, label in zip(x_all, y_all):
+        img_reshape = downsample_avg(img, m)
+        mnist_dict[label].append(np.array(img_reshape).flatten())
+
+    ###  create InputData object
+    if isinstance(n_classes, int):
+        return InputData(n_classes, [mnist_dict[key] for key in range(n_classes)])
+    else:
+        return InputData(len(n_classes), [mnist_dict[key] for key in n_classes])
+
+
+def load_and_format_iris(n_classes, scale):
+    # Load the Iris dataset
+    iris = datasets.load_iris()
+    x_all, y_all = iris.data, iris.target  # Features and labels
+
+    # Normalize features to range [0,1]
+    x_all = scale * (x_all - x_all.min(axis=0)) / (x_all.max(axis=0) - x_all.min(axis=0))
+    
+
+    # Initialize a dictionary with keys for each class
+    iris_dict = {i: [] for i in range(3)}
+
+    # Populate the dictionary with feature vectors
+    for features, label in zip(x_all, y_all):
+        iris_dict[label].append(np.array(features).flatten())
+
+    # Create and return InputData object
+    return InputData(n_classes, [iris_dict[key] for key in range(n_classes)])
+
+
+def evaluate_accuracy(weight_matrix, input_inds, input_data, output_inds, n_classes, n_evals):
+    accuracy = 0.0
+    for n in range(n_evals):
+        class_number = random.randrange(n_classes) # draw a random class label to present
+        # inputs = next(input_data.training_data[class_number]) # get the next data point from the iterator for this class
+
+        try:
+            inputs = next(input_data.testing_data[class_number])
+        except StopIteration:
+            input_data.refill_iterators()  # Refill iterators if exhausted
+            inputs = next(input_data.testing_data[class_number])  # Try again
+        
+        ss = weight_matrix.compute_ss_on_inputs(input_inds, inputs) # apply the data as input and get the steady state
+        ss_at_outputs = [ss[out] for out in output_inds]
+        if (np.argmax(ss_at_outputs) == class_number):
+            accuracy += 1.0
+        
+
+    return accuracy / n_evals
+
+def evaluate_accuracy_per_class(weight_matrix, input_inds, input_data, output_inds, n_evals, n_classes):
+    predictions_per_class = np.zeros((n_classes, n_classes))
+
+    for class_number in range(n_classes):
+
+        for n in range(n_evals):
+            try:
+                inputs = next(input_data.testing_data[class_number])
+            except StopIteration:
+                input_data.refill_iterators()  # Refill iterators if exhausted
+                inputs = next(input_data.testing_data[class_number])  # Try again
+            
+            ss = weight_matrix.compute_ss_on_inputs(input_inds, inputs) # apply the data as input and get the steady state
+            ss_at_outputs = [ss[out] for out in output_inds]
+
+            pred = np.argmax(ss_at_outputs) 
+            predictions_per_class[pred][class_number] += 1.0    
+
+    return predictions_per_class
+
+
 
 
 
