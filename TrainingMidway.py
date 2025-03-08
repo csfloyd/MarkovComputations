@@ -1,5 +1,3 @@
-output_dir = "/project/svaikunt/csfloyd/MarkovComputation/Dirs/"
-
 #################################################
 ################  Import things #################
 #################################################
@@ -22,6 +20,22 @@ import tensorflow as tf
 from tensorflow.keras.datasets import mnist
 from sklearn import datasets
 import pickle
+import argparse
+
+
+# Create argument parser
+parser = argparse.ArgumentParser(description="SLURM job script with arguments.")
+
+# Define command-line arguments
+parser.add_argument("--param1", type=int, required=True, help="An integer parameter")
+parser.add_argument("--param2", type=int, required=False, help="An integer parameter")
+parser.add_argument("--output", type=str, required=True, help="A string parameter")
+
+# Parse arguments
+args = parser.parse_args()
+
+output_dir = args.output
+
 
 ## here are the user-defined functions and classes
 from MarkovComputations import WeightMatrix, InputData, get_input_inds, get_output_inds, random_initial_parameters, compute_error, downsample_avg, load_and_format_mnist, load_and_format_iris, evaluate_accuracy, evaluate_accuracy_per_class
@@ -46,7 +60,7 @@ input_dim = 14**2 # D, how many components of each input data
 #input_dim = 4
 
 ### Define parameters of graph object and initial weights
-n_nodes = 80 # assuming a complete graph
+n_nodes = args.param1 # assuming a complete graph
 E_range = 0 # range of uniform distribution for Ej, etc.
 B_range = 0
 F_range = 0
@@ -132,7 +146,7 @@ end_time = time.time()
 print(f"Execution Time: {end_time - start_time:.6f} seconds")
 
    # Save to a file
-with open(output_dir + "SavedData.pkl", "wb") as file:
+with open(output_dir + "/SavedData.pkl", "wb") as file:
     pickle.dump((weight_matrix, input_data, accuracy_list, input_inds, output_inds), file)
 
 print("Data saved successfully.")
