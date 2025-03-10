@@ -45,10 +45,10 @@ from MarkovComputations import WeightMatrix, InputData, get_input_inds, get_outp
 ################  Parameter definitions #################
 #########################################################
 
-random.seed(20)
+random.seed(args.param2)
 
 ### Define parameters of classification
-M = 6 # how many edges affected per input dimension
+M = args.param1 # how many edges affected per input dimension
 
 # n_classes = 5 # D, how many classes
 
@@ -60,13 +60,13 @@ input_dim = 14**2 # D, how many components of each input data
 #input_dim = 4
 
 ### Define parameters of graph object and initial weights
-n_nodes = args.param1 # assuming a complete graph
-E_range = 0 # range of uniform distribution for Ej, etc.
-B_range = 0
-F_range = 0
+n_nodes = 80 # assuming a complete graph
+E_range = 1 # range of uniform distribution for Ej, etc.
+B_range = 1
+F_range = 1
 
 ### Define parameters of trainig
-n_training_iters = 2000 # how many training steps to take
+n_training_iters = 1500 # how many training steps to take
 eta = 1.5 # learning rate (increment of Ej, Bij, Fij)
 delta_E = 2 # nuding factor (change in Ej at output nodes during nudging)
 
@@ -89,7 +89,7 @@ Ej_list, Bij_list, Fij_list = random_initial_parameters(E_range, B_range, F_rang
 
 # Create WeightMatrix object
 weight_matrix = WeightMatrix(g, Ej_list, Bij_list, Fij_list)
-weight_matrix.lower_output_energies(output_inds, 0) # lower energies at the output nodes to ease training
+weight_matrix.lower_output_energies(output_inds, 4) # lower energies at the output nodes to ease training
 
 
 ############################################################

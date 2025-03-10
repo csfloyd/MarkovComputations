@@ -11,9 +11,8 @@ from functools import partial
 import timeit
 import random
 import copy
-import tensorflow as tf
-from tensorflow.keras.datasets import mnist
 from sklearn import datasets
+from sklearn.datasets import fetch_openml
 
 
 class WeightMatrix:
@@ -365,16 +364,15 @@ def downsample_avg(image, m=2):
 
 
 def load_and_format_mnist(n_classes, scale, m):
-    # Load the MNIST dataset
-    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    # Load the MNIST dataset from sklearn
+    mnist = fetch_openml('mnist_784', version=1, as_frame=False, cache = True)
+    x_all, y_all = mnist.data, mnist.target.astype(int)  # Convert labels to integers
 
     # Normalize pixel values to range [0,1]
-    x_train = scale * (x_train.astype(np.float32) / 255.0 - 0.0)
-    x_test = scale * (x_test.astype(np.float32) / 255.0 - 0.0)
+    x_all = scale * (x_all.astype(np.float32) / 255.0 - 0.0)
 
-    # Combine train and test sets
-    x_all = np.concatenate((x_train, x_test), axis=0)
-    y_all = np.concatenate((y_train, y_test), axis=0)
+    # Reshape images from (784,) to (28,28) for processing
+    x_all = x_all.reshape(-1, 28, 28)
 
     # Initialize an empty dictionary with keys for each digit class (0-9)
     mnist_dict = {i: [] for i in range(10)}
