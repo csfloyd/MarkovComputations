@@ -192,7 +192,7 @@ class WeightMatrix:
         nudge = delta_E * (2 * input_data.labels[class_number] - 1) 
         return self.nudged_ss(nudge, input_inds, inputs, output_inds)
 
-    def derivatives_of_ss(self, input_inds, inputs):
+    def derivatives_of_ss(self, input_inds, inputs, out_ind = None):
         """Compute derivatives of the steady state with respect to energy, bias, and force parameters.
 
         Args:
@@ -207,15 +207,24 @@ class WeightMatrix:
         # Compute the augmented weight matrix given inputs
         A = self.augmented_input_W_mat(input_inds, inputs)
 
-        # Compute the Jacobian of the steady-state function with respect to A
-        jacobian_fn = jax.jacrev(lambda A: WeightMatrix.get_steady_state(A, self.zero_array))
-        dW_mat = jacobian_fn(A)
-
         # Extract forward and reverse transition weights
         Wijs, Wjis = self.get_external_Wijs(A)
 
-        # Compute derivatives of transition weights
-        dWijs_full, dWjis_full = self.get_dWijs(dW_mat)
+        # Compute the Jacobian of the steady-state function with respect to A
+        jacobian_fn = jax.jacrev(lambda A: WeightMatrix.get_steady_state(A, self.zero_array))
+
+        if out_ind is None: # return all indices
+            dW_mat = jacobian_fn(A)
+
+            # Compute derivatives of transition weights
+            dWijs_full, dWjis_full = self.get_dWijs(dW_mat)
+        else:
+            dW_mat = jacobian_fn(A)[out_ind]
+
+            # Compute derivatives of transition weights
+            dWijs_full, dWjis_full = self.get_dWijs(np.array([dW_mat]))
+            dWijs_full = dWijs_full[0]
+            dWjis_full = dWjis_full[0]
 
         # Compute weighted derivatives
         dWijs_times_Wijs = dWijs_full * Wijs  # Shape: (n_nodes, n_edges)
@@ -240,6 +249,25 @@ class WeightMatrix:
         incrEj_list = np.einsum('n,nj->j', ss_frac, dEj_lists) # multiply derivatives by ss_frac to get the increments
         incrBij_list = np.einsum('n,nk->k', ss_frac, dBij_lists)
         incrFij_list = np.einsum('n,nk->k', ss_frac, dFij_lists)
+
+        self.set_W_mat( # update the parameters
+            self.Ej_list + eta * incrEj_list, 
+            self.Bij_list + eta * incrBij_list, 
+            self.Fij_list + eta * incrFij_list)
+
+    
+    def update_at_out(self, input_inds, inputs, ss_at_out, eta, out_ind):
+        """Update the weight matrix parameters based on the error, by computing the derivatives using autodiff."""
+
+        dEj_lists, dBij_lists, dFij_lists = self.derivatives_of_ss(input_inds, inputs, out_ind) # get the derivatives of the steady state
+
+        # incrEj_list = (1/ss_at_out) * dEj_lists[out_ind]
+        # incrBij_list = (1/ss_at_out) * dBij_lists[out_ind]
+        # incrFij_list = (1/ss_at_out) * dFij_lists[out_ind]
+
+        incrEj_list = (1/ss_at_out) * dEj_lists
+        incrBij_list = (1/ss_at_out) * dBij_lists
+        incrFij_list = (1/ss_at_out) * dFij_lists
 
         self.set_W_mat( # update the parameters
             self.Ej_list + eta * incrEj_list, 
