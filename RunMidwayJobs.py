@@ -25,7 +25,7 @@ job_template = """#!/bin/bash
 
 # module load python3
 
-python3 /project/svaikunt/csfloyd/MarkovComputation/Python/TrainingMidway.py --param1 {param1} --output {output}
+python3 /project/svaikunt/csfloyd/MarkovComputation/Python/TrainingMidwayStacked.py --param1 {param1} --output {output}
 """
 
 if n_params == 1:

@@ -248,6 +248,174 @@ class WeightMatrix:
 
 
 
+class StackedWeightMatrices:
+    """
+    Represents stacked weight matrices for a network, computing transition probabilities
+    based on node and edge parameters.
+    """
+
+    def __init__(self, weight_matrix_list,
+                external_dims, internal_dims, # external dims is [external_input_dim, external_output_dim], and similarly for input dims
+                M_vals, A_fac, b_fac, rand_bool = True):
+        """
+        Initializes the weight matrix.
+
+        Parameters:
+
+        """
+        self.weight_matrix_list = weight_matrix_list
+        self.L = len(weight_matrix_list)
+        self._set_input_output_inds(external_dims, internal_dims, M_vals, rand_bool)
+        self._set_A_matrices(A_fac)
+        self._set_b_vectors(b_fac)
+        
+
+    def _set_input_output_inds(self, external_dims, internal_dims, M_vals, rand_bool):
+
+        ## check that lengths are correct
+        assert(self.L == len(M_vals))
+        assert(self.L-1 == len(internal_dims[0]))
+        assert(self.L-1 == len(internal_dims[1]))
+
+        self.external_input_inds = get_input_inds(self.weight_matrix_list[0].n_edges, external_dims[0], M_vals[0])
+        self.external_output_inds = get_output_inds(self.weight_matrix_list[0].n_nodes, external_dims[1], rand_bool) 
+        
+        self.internal_input_inds = [get_input_inds(self.weight_matrix_list[l+1].n_edges, internal_dims[0][l], M_vals[l+1]) for l in range(0, self.L-1)]
+        self.internal_output_inds = [get_output_inds(self.weight_matrix_list[l].n_nodes, internal_dims[1][l], rand_bool) for l in range(0, self.L-1)]
+
+
+    def _set_A_matrices(self, A_fac):
+
+        A_matrices_list = []
+
+        for l in range(self.L-1):
+            if len(self.internal_output_inds[l]) == len(self.internal_input_inds[l]):
+                A_matrices_list.append(A_fac * np.identity(len(self.internal_output_inds[l])))
+            else:
+                A_matrices_list.append(A_fac * np.random.rand(len(self.internal_input_inds[l]), len(self.internal_output_inds[l])))
+        
+        self.A_matrices_list = A_matrices_list
+
+
+    def _set_b_vectors(self, b_fac):
+
+        b_vectors_list = []
+
+        for l in range(self.L-1):
+            b_vectors_list.append(-0.5 * b_fac * np.ones(len(self.internal_input_inds[l])))
+        
+        self.b_vectors_list = b_vectors_list
+
+
+    def compute_stacked_ss_on_inputs(self, inputs):
+
+        ss_list = [self.weight_matrix_list[0].compute_ss_on_inputs(self.external_input_inds, inputs)]
+        inputs_list = [inputs]
+
+        for l in range(self.L-1):
+            A = self.A_matrices_list[l]
+            x = [ss_list[l][i] for i in self.internal_output_inds[l]]
+            new_inputs = np.dot(A, x) + self.b_vectors_list[l]
+            ss_list.append(self.weight_matrix_list[l+1].compute_ss_on_inputs(self.internal_input_inds[l], new_inputs))
+            inputs_list.append(new_inputs)
+
+        return ss_list, inputs_list
+        
+
+    def stacked_derivatives_of_ss(self, ss_list, inputs_list):
+
+        full_input_inds = [(self.external_input_inds if l == 0 else self.internal_input_inds[l-1]) for l in range(self.L)]
+
+        ## get dpi_l / dEi, dpi_l / dBij, dpi_l / dFij for each l
+        dpil_dthetal_lists = [self.weight_matrix_list[l].derivatives_of_ss(full_input_inds[l], inputs_list[l]) for l in range(self.L)]
+
+        ## get x at the internal steady states
+        x_lists = [ss_list[l][np.array(self.internal_output_inds[l])]  for l in range(self.L-1)]
+        
+        dpil_dFIl_lists = []
+        for l in range(self.L):
+            n_nodes = self.weight_matrix_list[l].n_nodes
+            full_inds = full_input_inds[l]
+            dpil_dFIl = np.zeros((n_nodes, len(full_inds)))
+            for m, inds in enumerate(full_inds):  # Iterate over columns
+                dpil_dFIl[:, m] = np.sum(
+                    [dpil_dthetal_lists[l][2][:, ind] for ind in inds], axis=0)
+            dpil_dFIl_lists.append(dpil_dFIl)
+        
+
+        dFIl_dAl_lists = [] # L-1 of these
+        dFIl_dbl_lists = [] # L-1 of these
+        for l in range(1, self.L):
+            dFIl_dAl = np.zeros((len(full_input_inds[l]), len(full_input_inds[l]), len(self.internal_output_inds[l-1])))
+            for k in range(len(self.internal_output_inds[l-1])):
+                dFIl_dAl[:,:,k] = np.identity(len(full_input_inds[l])) * x_lists[l-1][k]
+            dFIl_dAl_lists.append(dFIl_dAl)
+            dFIl_dbl_lists.append(np.identity(len(full_input_inds[l])))
+
+        dpiL_dpiol_lists = [] # L-1 of these
+        if self.L > 1: 
+            dpiL_dpiol_lists.append(np.dot(dpil_dFIl_lists[self.L-1], self.A_matrices_list[self.L-2])) 
+        for l in range(self.L-3, -1, -1):
+            dpiol_dpiolm1 = np.dot(dpil_dFIl_lists[l+1][np.array(self.internal_output_inds[l+1])], self.A_matrices_list[l])
+            dpiL_dpiol_lists.insert(0, np.dot(dpiL_dpiol_lists[0], dpiol_dpiolm1))
+
+        
+        dpiL_dthetal_lists = [] # L of these
+        for l in range(self.L-1): # add last one outside the loop
+            dpiL_dEil = np.dot(dpiL_dpiol_lists[l], dpil_dthetal_lists[l][0][np.array(self.internal_output_inds[l])])
+            dpiL_dBijl = np.dot(dpiL_dpiol_lists[l], dpil_dthetal_lists[l][1][np.array(self.internal_output_inds[l])])
+            dpiL_dFijl = np.dot(dpiL_dpiol_lists[l], dpil_dthetal_lists[l][2][np.array(self.internal_output_inds[l])])
+            dpiL_dthetal_lists.append([dpiL_dEil, dpiL_dBijl, dpiL_dFijl])
+        dpiL_dthetal_lists.append(dpil_dthetal_lists[self.L-1])
+
+
+        dpiL_dAl_lists = [] # L-1 of these
+        dpiL_dbl_lists = [] # L-1 of these
+        for l in range(self.L-1):  
+            if l == self.L-1:
+                dpiL_dFIlp1 = np.dot(dpiL_dpiol_lists[l+1], dpil_dFIl_lists[l+1][np.array(self.internal_output_inds[l+1])])
+            else: 
+                dpiL_dFIlp1 = dpil_dFIl_lists[l+1][np.array(self.external_output_inds[0])]
+
+            dFIlp1_dAl = np.dot(dpiL_dFIlp1, dFIl_dAl_lists[l])
+            dFIlp1_dbl = np.dot(dpiL_dFIlp1, dFIl_dbl_lists[l])
+            dpiL_dAl_lists.append(dFIlp1_dAl)
+            dpiL_dbl_lists.append(dFIlp1_dbl)
+
+
+        return dpiL_dthetal_lists, dpiL_dAl_lists, dpiL_dbl_lists
+
+    
+    def update(self, ss_list, inputs_list, class_number, eta):
+        """Update the weight matrix parameters based on the error, by computing the derivatives using autodiff."""
+
+        dpiL_dthetal_lists, dpiL_dAl_lists, dpiL_dbl_lists = self.stacked_derivatives_of_ss(ss_list, inputs_list) # get the derivatives of the steady state
+
+        out_ind = self.external_output_inds[class_number]
+        fac = 1 / (ss_list[self.L-1][out_ind])
+        for l in range(self.L):
+            dpiL_dthetal = dpiL_dthetal_lists[l]
+            incrEj_list = fac * dpiL_dthetal[0][out_ind]
+            incrBij_list = fac * dpiL_dthetal[1][out_ind]
+            incrFij_list = fac * dpiL_dthetal[2][out_ind]
+
+            self.weight_matrix_list[l].set_W_mat( # update the parameters
+                self.weight_matrix_list[l].Ej_list + eta * incrEj_list, 
+                self.weight_matrix_list[l].Bij_list + eta * incrBij_list, 
+                self.weight_matrix_list[l].Fij_list + eta * incrFij_list)
+            
+        
+        for l in range(self.L-1):
+            dpiL_dAl = dpiL_dAl_lists[l]
+            dpiL_dbl = dpiL_dbl_lists[l]
+            incrAl = fac * dpiL_dAl
+            incrbl = fac * dpiL_dbl
+
+            self.A_matrices_list[l] += eta * incrAl
+            self.b_vectors_list[l] += eta * incrbl
+
+
+
 
 class InputData:
     """
@@ -427,6 +595,23 @@ def evaluate_accuracy(weight_matrix, input_inds, input_data, output_inds, n_clas
             accuracy += 1.0
         
 
+    return accuracy / n_evals
+
+def evaluate_accuracy_stacked(stacked_weight_matrices, input_data, n_classes, n_evals):
+    accuracy = 0.0
+    for n in range(n_evals):
+        class_number = random.randrange(n_classes) # draw a random class label to present
+        try:
+            inputs = next(input_data.testing_data[class_number])
+        except StopIteration:
+            input_data.refill_iterators()  # Refill iterators if exhausted
+            inputs = next(input_data.testing_data[class_number])  # Try again
+        
+        ss_list, inputs_list = stacked_weight_matrices.compute_stacked_ss_on_inputs(inputs)
+        ss_at_outputs = [ss_list[-1][out] for out in stacked_weight_matrices.external_output_inds]
+        if (np.argmax(ss_at_outputs) == class_number):
+            accuracy += 1.0
+    
     return accuracy / n_evals
 
 def evaluate_accuracy_per_class(weight_matrix, input_inds, input_data, output_inds, n_evals, n_classes):
