@@ -1,14 +1,15 @@
 import os
 import shutil
 
-n_params = 2
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/Dirs/M_seed/"
+n_params = 1
+output_base = "/project/svaikunt/csfloyd/MarkovComputation/Dirs/M_L2/"
 
 # Define the range of values for param1 and labels for param2
 param1_values = [60, 70, 80, 90, 100] 
 param1_values = [1,2,3,4,5,6,7,8]
-
-param2_values = [1, 2, 3, 4, 5] # random seed
+param1_values = [1, 5, 10, 15, 20, 15, 30]
+param1_values = [1, 2, 3, 4, 5, 10, 15, 20]
+param1_values = [1, 2, 3, 4, 5] # random seed
 
 
 # SLURM job template
@@ -71,7 +72,7 @@ job_template_2 = """#!/bin/bash
 
 # module load python3
 
-python3 /project/svaikunt/csfloyd/MarkovComputation/Python/TrainingMidway.py --param1 {param1} --param2 {param2} --output {output}
+python3 /project/svaikunt/csfloyd/MarkovComputation/Python/TrainingMidwayStacked.py --param1 {param1} --param2 {param2} --output {output}
 """
 
 if n_params == 2:

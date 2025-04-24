@@ -250,7 +250,7 @@ class WeightMatrix:
 
 class StackedWeightMatrices:
     """
-    Represents stacked weight matrices for a network, computing transition probabilities
+    Represents a weight matrix for a network, computing transition probabilities
     based on node and edge parameters.
     """
 
@@ -277,10 +277,10 @@ class StackedWeightMatrices:
         assert(self.L-1 == len(internal_dims[0]))
         assert(self.L-1 == len(internal_dims[1]))
 
-        self.external_input_inds = get_input_inds(self.weight_matrix_list[0].n_edges, external_dims[0], M_vals[0])
+        self.external_input_inds = get_input_inds(self.weight_matrix_list[0].n_edges, external_dims[0], M_vals[0], rand_bool)
         self.external_output_inds = get_output_inds(self.weight_matrix_list[0].n_nodes, external_dims[1], rand_bool) 
         
-        self.internal_input_inds = [get_input_inds(self.weight_matrix_list[l+1].n_edges, internal_dims[0][l], M_vals[l+1]) for l in range(0, self.L-1)]
+        self.internal_input_inds = [get_input_inds(self.weight_matrix_list[l+1].n_edges, internal_dims[0][l], M_vals[l+1], rand_bool) for l in range(0, self.L-1)]
         self.internal_output_inds = [get_output_inds(self.weight_matrix_list[l].n_nodes, internal_dims[1][l], rand_bool) for l in range(0, self.L-1)]
 
 
@@ -372,11 +372,10 @@ class StackedWeightMatrices:
         dpiL_dAl_lists = [] # L-1 of these
         dpiL_dbl_lists = [] # L-1 of these
         for l in range(self.L-1):  
-            if l == self.L-1:
+            if l < self.L-2:
                 dpiL_dFIlp1 = np.dot(dpiL_dpiol_lists[l+1], dpil_dFIl_lists[l+1][np.array(self.internal_output_inds[l+1])])
             else: 
-                dpiL_dFIlp1 = dpil_dFIl_lists[l+1][np.array(self.external_output_inds[0])]
-
+                dpiL_dFIlp1 = dpil_dFIl_lists[l+1]
             dFIlp1_dAl = np.dot(dpiL_dFIlp1, dFIl_dAl_lists[l])
             dFIlp1_dbl = np.dot(dpiL_dFIlp1, dFIl_dbl_lists[l])
             dpiL_dAl_lists.append(dFIlp1_dAl)
@@ -406,14 +405,13 @@ class StackedWeightMatrices:
             
         
         for l in range(self.L-1):
-            dpiL_dAl = dpiL_dAl_lists[l]
-            dpiL_dbl = dpiL_dbl_lists[l]
-            incrAl = fac * dpiL_dAl
-            incrbl = fac * dpiL_dbl
+            incrAl = fac * dpiL_dAl_lists[l][out_ind]
+            incrbl = fac * dpiL_dbl_lists[l][out_ind]
 
             self.A_matrices_list[l] += eta * incrAl
             self.b_vectors_list[l] += eta * incrbl
 
+        
 
 
 
@@ -473,7 +471,7 @@ def compute_soft_maxed_output(ss, output_inds):
     return exp_shifted / np.sum(exp_shifted)
 
 
-def get_input_inds(n_edges, input_dim, M):
+def get_input_inds(n_edges, input_dim, M, rand_bool=True):
     """
     Selects random edges to receive inputs.
 
@@ -485,9 +483,13 @@ def get_input_inds(n_edges, input_dim, M):
     Returns:
     - List of selected edge indices per input channel
     """
-    shuffled_inds = list(range(n_edges))
-    random.shuffle(shuffled_inds)
-    return [shuffled_inds[m * M:(m + 1) * M] for m in range(input_dim)]
+    if rand_bool:
+        shuffled_inds = list(range(n_edges))
+        random.shuffle(shuffled_inds)
+        return [shuffled_inds[m * M:(m + 1) * M] for m in range(input_dim)]
+    else:
+        inds = list(range(n_edges))
+        return [inds[m * M:(m + 1) * M] for m in range(input_dim)]
 
 
 def get_output_inds(n_nodes, n_classes, rand_bool=True):
