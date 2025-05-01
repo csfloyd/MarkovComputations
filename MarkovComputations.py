@@ -634,6 +634,42 @@ def evaluate_accuracy_per_class(weight_matrix, input_inds, input_data, output_in
 
     return predictions_per_class
 
+def get_spanning_trees(n_nodes,edge_w,N_trees,maximum=True):
+    #provide edge weights of a complete graoh with n_nodes to obtain N_trees spanning trees 
+    #from decreasing (maximum=True) or increasing value (maximum=False)
+    for wij in edge_w:
+        dir_g = nx.DiGraph()
+        dir_g.add_nodes_from(range(n_nodes))
+        for kk in range(n_nodes):
+            for ll in range(n_nodes):
+                if kk != ll:
+                    dir_g.add_edge(kk,ll,weight= edge_w[kk][ll]) #these are the reveresed edges to account for the inverse of the root direction used in graph theory  
+    
+    span_trees = []
+    span_trees_roots = []
+    
+    if N_trees < 2 :
+        if maximum:
+            span_trees.append(nx.maximum_spanning_arborescence(dir_g).reverse())
+            span_trees_roots.append(np.argmin(list(dict(span_trees[-1].out_degree()).values())))
+    
+        else: 
+            span_trees.append(nx.minimum_spanning_arborescence(dir_g).reverse())
+            span_trees_roots.append(np.argmin(list(dict(span_trees[-1].out_degree()).values())))
+        
+    else:
+    
+        tree_iter = nx.algorithms.tree.branchings.ArborescenceIterator(dir_g, minimum= not maximum)
+    
+        for tree_i, s_tree in enumerate(tree_iter):
+            span_trees.append(s_tree.reverse())
+            span_trees_roots.append(np.argmin(list(dict(span_trees[-1].out_degree()).values())))
+            print('finished with tree',tree_i)
+            if tree_i == N_trees - 1 :
+                break
+    
+    return (span_trees_roots, span_trees)
+
 
 
 
