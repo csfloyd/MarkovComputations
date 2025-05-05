@@ -13,6 +13,7 @@ import random
 import copy
 from sklearn import datasets
 from sklearn.datasets import fetch_openml
+import torch
 
 
 class WeightMatrix:
@@ -246,6 +247,14 @@ class WeightMatrix:
             self.Bij_list + eta * incrBij_list, 
             self.Fij_list + eta * incrFij_list)
 
+    def compute_output(self, inputs, input_inds, output_inds):
+        """
+        Computes output probabilities for the given inputs and output indices.
+        Assumes the steady-state values at output_inds are already normalized probabilities.
+        """
+        ss = self.compute_ss_on_inputs(input_inds, inputs)
+        probs = np.array([ss[out] for out in output_inds])
+        return probs
 
 
 class StackedWeightMatrices:
@@ -412,7 +421,258 @@ class StackedWeightMatrices:
             self.b_vectors_list[l] += eta * incrbl
 
         
+    def compute_output(self, inputs):
+        """
+        Computes output probabilities for the given inputs using the stacked Markov layers.
+        Assumes the steady-state values at external_output_inds are already normalized probabilities.
+        """
+        ss_list, _ = self.compute_stacked_ss_on_inputs(inputs)
+        probs = np.array([ss_list[-1][out] for out in self.external_output_inds])
+        return probs
 
+
+class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
+    """
+    Extends StackedWeightMatrices by adding a perceptron layer implemented in PyTorch.
+    The perceptron takes the final steady-state output and performs additional processing.
+    """
+
+    def __init__(self, weight_matrix_list,
+                external_dims, internal_dims,
+                M_vals, A_fac, b_fac,
+                perceptron_hidden_dims,  # List of hidden layer dimensions
+                perceptron_output_dim,   # Final output dimension
+                rand_bool=True):
+        """
+        Initializes the combined Markov-Perceptron architecture.
+
+        Parameters:
+        - weight_matrix_list: List of WeightMatrix objects for the Markov computation
+        - external_dims: [external_input_dim, external_output_dim] for Markov layers
+        - internal_dims: Internal dimensions for Markov layers
+        - M_vals: Number of edges per input for each layer
+        - A_fac: Scaling factor for A matrices
+        - b_fac: Scaling factor for b vectors
+        - perceptron_hidden_dims: List of hidden layer dimensions for the perceptron
+        - perceptron_output_dim: Output dimension of the perceptron
+        - rand_bool: Whether to use random initialization
+        """
+        # Initialize the base StackedWeightMatrices
+        super().__init__(weight_matrix_list, external_dims, internal_dims, 
+                        M_vals, A_fac, b_fac, rand_bool)
+        
+        # Store perceptron dimensions
+        self.perceptron_input_dim = len(self.external_output_inds)
+        self.perceptron_hidden_dims = perceptron_hidden_dims
+        self.perceptron_output_dim = perceptron_output_dim
+        
+        # Initialize the perceptron layers
+        self._init_perceptron(perceptron_hidden_dims, perceptron_output_dim)
+
+    def _init_perceptron(self, hidden_dims, output_dim):
+        """
+        Initializes the perceptron layers using PyTorch.
+        Creates a multi-layer perceptron with ReLU activations and log-softmax output.
+        """
+        layers = []
+        in_dim = self.perceptron_input_dim
+
+        # Build hidden layers
+        for hidden_dim in hidden_dims:
+            layers.extend([
+                torch.nn.Linear(in_dim, hidden_dim),
+                torch.nn.ReLU()
+            ])
+            in_dim = hidden_dim
+
+        # Add output layer with log-softmax activation for numerical stability
+        layers.extend([
+            torch.nn.Linear(in_dim, output_dim),
+            torch.nn.LogSoftmax(dim=1)
+        ])
+        
+        # Create sequential model
+        self.perceptron = torch.nn.Sequential(*layers)
+        
+        # Loss function
+        self.criterion = torch.nn.NLLLoss() # negative log-likelihood
+
+    def compute_combined_output(self, inputs):
+        """
+        Computes the full forward pass through both Markov and perceptron layers.
+
+        Parameters:
+        - inputs: Input data for the Markov computation
+
+        Returns:
+        - markov_ss_list: List of steady states from Markov layers
+        - inputs_list: List of inputs used at each Markov layer
+        - perceptron_output: Final output after perceptron processing (log probabilities)
+        """
+        # Get Markov steady states
+        markov_ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+        
+        # Extract final layer steady states at output indices
+        final_ss = np.array(markov_ss_list[-1])  # Convert JAX array to numpy
+        markov_outputs = torch.tensor([final_ss[i] for i in self.external_output_inds], 
+                                    dtype=torch.float32).unsqueeze(0)
+        
+        # Forward pass through perceptron
+        self.perceptron.eval()  # Set to evaluation mode
+        with torch.no_grad():
+            log_probs = self.perceptron(markov_outputs)
+            perceptron_output = torch.exp(log_probs)  # Convert back to probabilities
+        
+        return markov_ss_list, inputs_list, perceptron_output
+
+    def compute_combined_gradients(self, inputs, target, markov_ss_list=None, inputs_list=None):
+        """
+        Computes gradients for both Markov and perceptron parameters.
+        Uses chain rule to backpropagate the loss through both the perceptron and Markov components.
+        If markov_ss_list and inputs_list are provided, uses them instead of recomputing.
+        """
+        # Get Markov steady states
+        if markov_ss_list is None or inputs_list is None:
+            markov_ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+        
+        # Convert JAX arrays to numpy arrays
+        markov_ss_list = [np.array(ss) for ss in markov_ss_list]
+        inputs_list = [np.array(inp) for inp in inputs_list]
+        
+        # Extract final layer steady states at output indices
+        final_ss = markov_ss_list[-1]
+        markov_outputs = torch.tensor([final_ss[i] for i in self.external_output_inds], 
+                                    dtype=torch.float32).unsqueeze(0)
+        markov_outputs.requires_grad_(True)
+        
+        # Forward pass through perceptron
+        self.perceptron.train() # sets to training mode
+        for param in self.perceptron.parameters():
+            if param.grad is not None:
+                param.grad.zero_() # zero out the gradient if it exists
+                
+        log_probs = self.perceptron(markov_outputs) 
+        
+        # Compute loss and get initial gradient
+        target_tensor = torch.tensor([target], dtype=torch.long)
+        loss = self.criterion(log_probs, target_tensor) # computes the target element of the log_probs
+        loss.backward() # gradents are stored in .grad attribute of each parameter
+        
+        # Get gradient with respect to Markov outputs
+        dLoss_dMarkov = markov_outputs.grad.numpy() # get the gradient of the loss with respect to the Markov outputs
+        
+        # Get perceptron gradients
+        perceptron_gradients = {name: param.grad.clone() for name, param in self.perceptron.named_parameters()}
+        
+        # Compute Markov gradients using the chain rule
+        dpiL_dthetal_lists, dpiL_dAl_lists, dpiL_dbl_lists = self.stacked_derivatives_of_ss(markov_ss_list, inputs_list)
+        
+        # Convert JAX arrays to numpy if needed
+        dpiL_dthetal_lists = [[np.array(grad) for grad in layer_grads] for layer_grads in dpiL_dthetal_lists]
+        dpiL_dAl_lists = [np.array(grad) for grad in dpiL_dAl_lists]
+        dpiL_dbl_lists = [np.array(grad) for grad in dpiL_dbl_lists]
+        
+        markov_gradients = {
+            'theta': [],
+            'A': [],
+            'b': []
+        }
+        
+        # Process theta gradients for each layer
+        for l in range(self.L):
+            wm = self.weight_matrix_list[l]
+            
+            # Initialize gradients with correct shapes
+            Ej_grad = np.zeros_like(wm.Ej_list)
+            Bij_grad = np.zeros_like(wm.Bij_list)
+            Fij_grad = np.zeros_like(wm.Fij_list)
+            
+            # Accumulate gradients for each output
+            for out_idx, out_ind in enumerate(self.external_output_inds):
+                # Ensure proper broadcasting by matching shapes
+                dtheta = dpiL_dthetal_lists[l]
+                Ej_grad += dLoss_dMarkov[0, out_idx] * dtheta[0][out_ind]
+                Bij_grad += dLoss_dMarkov[0, out_idx] * dtheta[1][out_ind]
+                Fij_grad += dLoss_dMarkov[0, out_idx] * dtheta[2][out_ind]
+    
+            markov_gradients['theta'].append([Ej_grad, Bij_grad, Fij_grad])
+        
+        # Process A and b gradients
+        for l in range(self.L - 1):
+            A_grad = np.zeros_like(self.A_matrices_list[l])
+            b_grad = np.zeros_like(self.b_vectors_list[l])
+            
+            for out_idx, out_ind in enumerate(self.external_output_inds):
+                A_grad += dLoss_dMarkov[0, out_idx] * dpiL_dAl_lists[l][out_ind]
+                b_grad += dLoss_dMarkov[0, out_idx] * dpiL_dbl_lists[l][out_ind]
+            
+            markov_gradients['A'].append(A_grad)
+            markov_gradients['b'].append(b_grad)
+        
+        return markov_gradients, perceptron_gradients
+    
+    def _perceptron_step(self, eta_perceptron):
+        """
+        Performs a simple gradient descent step on the perceptron parameters.
+        
+        Parameters:
+        - eta_perceptron: Learning rate for perceptron parameters
+        """
+        with torch.no_grad():
+            for layer in self.perceptron:
+                if isinstance(layer, torch.nn.Linear):
+                    # Update weights
+                    layer.weight -= eta_perceptron * layer.weight.grad
+                    # Update bias
+                    layer.bias -= eta_perceptron * layer.bias.grad
+
+    def update_combined(self, inputs, target, eta_markov, eta_perceptron, markov_ss_list=None, inputs_list=None):
+        """
+        Updates both Markov and perceptron parameters using computed gradients.
+        If markov_ss_list and inputs_list are provided, uses them instead of recomputing.
+        """
+        # Compute all gradients with proper backpropagation
+        markov_gradients, _ = self.compute_combined_gradients(
+            inputs, target, markov_ss_list=markov_ss_list, inputs_list=inputs_list
+        )
+        
+        # Update Markov parameters using the backpropagated gradients
+        for l in range(self.L):
+            Ej_grad, Bij_grad, Fij_grad = markov_gradients['theta'][l]
+            wm = self.weight_matrix_list[l]
+            
+            # Ensure gradients have correct shapes
+            Ej_grad = np.asarray(Ej_grad).reshape(wm.Ej_list.shape)
+            Bij_grad = np.asarray(Bij_grad).reshape(wm.Bij_list.shape)
+            Fij_grad = np.asarray(Fij_grad).reshape(wm.Fij_list.shape)
+            
+            # Update parameters with shape verification 
+            new_Ej = wm.Ej_list - eta_markov * Ej_grad
+            new_Bij = wm.Bij_list - eta_markov * Bij_grad
+            new_Fij = wm.Fij_list - eta_markov * Fij_grad
+               
+            # Update parameters
+            wm.set_W_mat(new_Ej, new_Bij, new_Fij)
+        
+        # Update A matrices and b vectors
+        for l in range(self.L - 1):
+            A_grad = np.asarray(markov_gradients['A'][l]).reshape(self.A_matrices_list[l].shape)
+            b_grad = np.asarray(markov_gradients['b'][l]).reshape(self.b_vectors_list[l].shape)
+
+            
+            self.A_matrices_list[l] -= eta_markov * A_grad
+            self.b_vectors_list[l] -= eta_markov * b_grad
+        
+        # Update perceptron parameters using simple gradient descent
+        self._perceptron_step(eta_perceptron)
+
+    def compute_output(self, inputs):
+        """
+        Computes output probabilities for the given inputs using the Markov-Perceptron model.
+        Returns the perceptron output probabilities as a numpy array.
+        """
+        _, _, perceptron_output = self.compute_combined_output(inputs)
+        return perceptron_output.squeeze().detach().cpu().numpy()
 
 
 class InputData:
@@ -579,62 +839,77 @@ def load_and_format_iris(n_classes, scale):
     return InputData(n_classes, [iris_dict[key] for key in range(n_classes)])
 
 
-def evaluate_accuracy(weight_matrix, input_inds, input_data, output_inds, n_classes, n_evals):
+
+def evaluate_accuracy(model, input_data, n_classes, n_evals, input_inds=None, output_inds=None):
+    """
+    Generalized accuracy evaluation for any model with a compute_output method.
+
+    Parameters:
+    - model: The model instance (must have compute_output method)
+    - input_data: InputData object
+    - n_classes: Number of classes
+    - n_evals: Number of evaluation samples
+    - input_inds: (Optional) Input indices for WeightMatrix
+    - output_inds: (Optional) Output indices for WeightMatrix
+
+    Returns:
+    - accuracy: Classification accuracy (float)
+    """
     accuracy = 0.0
     for n in range(n_evals):
-        class_number = random.randrange(n_classes) # draw a random class label to present
-        # inputs = next(input_data.training_data[class_number]) # get the next data point from the iterator for this class
-
+        class_number = random.randrange(n_classes)
         try:
             inputs = next(input_data.testing_data[class_number])
         except StopIteration:
-            input_data.refill_iterators()  # Refill iterators if exhausted
-            inputs = next(input_data.testing_data[class_number])  # Try again
-        
-        ss = weight_matrix.compute_ss_on_inputs(input_inds, inputs) # apply the data as input and get the steady state
-        ss_at_outputs = [ss[out] for out in output_inds]
-        if (np.argmax(ss_at_outputs) == class_number):
-            accuracy += 1.0
-        
-
-    return accuracy / n_evals
-
-def evaluate_accuracy_stacked(stacked_weight_matrices, input_data, n_classes, n_evals):
-    accuracy = 0.0
-    for n in range(n_evals):
-        class_number = random.randrange(n_classes) # draw a random class label to present
-        try:
+            input_data.refill_iterators()
             inputs = next(input_data.testing_data[class_number])
-        except StopIteration:
-            input_data.refill_iterators()  # Refill iterators if exhausted
-            inputs = next(input_data.testing_data[class_number])  # Try again
-        
-        ss_list, inputs_list = stacked_weight_matrices.compute_stacked_ss_on_inputs(inputs)
-        ss_at_outputs = [ss_list[-1][out] for out in stacked_weight_matrices.external_output_inds]
-        if (np.argmax(ss_at_outputs) == class_number):
+
+        if isinstance(model, WeightMatrix):
+            probs = model.compute_output(inputs, input_inds, output_inds)
+        else:
+            probs = model.compute_output(inputs)
+
+        pred = np.argmax(probs)
+        if pred == class_number:
             accuracy += 1.0
-    
+
     return accuracy / n_evals
 
-def evaluate_accuracy_per_class(weight_matrix, input_inds, input_data, output_inds, n_evals, n_classes):
+def evaluate_accuracy_per_class(model, input_data, n_evals, n_classes, input_inds=None, output_inds=None):
+    """
+    Generalized accuracy-per-class evaluation for any model with a compute_output method.
+
+    Parameters:
+    - model: The model instance (must have compute_output method)
+    - input_data: InputData object
+    - n_evals: Number of evaluation samples per class
+    - n_classes: Number of classes
+    - input_inds: (Optional) Input indices for WeightMatrix
+    - output_inds: (Optional) Output indices for WeightMatrix
+
+    Returns:
+    - predictions_per_class: n_classes x n_classes confusion matrix
+    """
     predictions_per_class = np.zeros((n_classes, n_classes))
 
     for class_number in range(n_classes):
-
         for n in range(n_evals):
             try:
                 inputs = next(input_data.testing_data[class_number])
             except StopIteration:
-                input_data.refill_iterators()  # Refill iterators if exhausted
-                inputs = next(input_data.testing_data[class_number])  # Try again
-            
-            ss = weight_matrix.compute_ss_on_inputs(input_inds, inputs) # apply the data as input and get the steady state
-            ss_at_outputs = [ss[out] for out in output_inds]
+                input_data.refill_iterators()
+                inputs = next(input_data.testing_data[class_number])
 
-            pred = np.argmax(ss_at_outputs) 
-            predictions_per_class[pred][class_number] += 1.0    
+            if isinstance(model, WeightMatrix):
+                probs = model.compute_output(inputs, input_inds, output_inds)
+            else:
+                probs = model.compute_output(inputs)
+
+            pred = np.argmax(probs)
+            predictions_per_class[pred][class_number] += 1.0
 
     return predictions_per_class
+
 
 def get_spanning_trees(n_nodes,edge_w,N_trees,maximum=True):
     #provide edge weights of a complete graoh with n_nodes to obtain N_trees spanning trees 
@@ -671,9 +946,6 @@ def get_spanning_trees(n_nodes,edge_w,N_trees,maximum=True):
                 break
     
     return (span_trees_roots, span_trees)
-
-
-
 
 
 
