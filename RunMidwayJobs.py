@@ -2,14 +2,21 @@ import os
 import shutil
 
 n_params = 1
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/Dirs/M_L2/"
+output_base = "/project/svaikunt/csfloyd/MarkovComputation/Dirs/external_output_dim_p_full_n/"
+output_base = "/project/svaikunt/csfloyd/MarkovComputation/Dirs/M_p_full_long3/"
 
 # Define the range of values for param1 and labels for param2
 param1_values = [60, 70, 80, 90, 100] 
-param1_values = [1,2,3,4,5,6,7,8]
-param1_values = [1, 5, 10, 15, 20, 15, 30]
-param1_values = [1, 2, 3, 4, 5, 10, 15, 20]
-param1_values = [1, 2, 3, 4, 5] # random seed
+param1_values = [5, 10, 15, 20]
+param1_values = [10, 20, 30, 40, 50]
+param1_values = [5, 10, 15, 20]
+param1_values = [50, 60, 70]
+
+#param1_values = [5, 25, 50, 75]
+#param1_values = [1, 5, 10, 15, 20, 15, 30]
+param1_values = [1, 2, 4, 6]
+#param1_values = [5, 10, 20, 30]
+#param1_values = [1, 2, 3, 4, 5] # random seed
 
 
 # SLURM job template
@@ -17,7 +24,7 @@ job_template = """#!/bin/bash
 #SBATCH --job-name=computation
 #SBATCH --output={output}/training_batch.out   # Redirect stdout to the output directory
 #SBATCH --error={output}/training_batch.err    # Redirect stderr to the output directory
-#SBATCH --time=5:00:00
+#SBATCH --time=32:00:00
 #SBATCH --partition=caslake
 ##SBATCH --partition=svaikunt 
 #SBATCH --account=pi-svaikunt
@@ -26,7 +33,7 @@ job_template = """#!/bin/bash
 
 # module load python3
 
-python3 /project/svaikunt/csfloyd/MarkovComputation/Python/TrainingMidwayStacked.py --param1 {param1} --output {output}
+python3 /project/svaikunt/csfloyd/MarkovComputation/Python/TrainingMidwayPerceptron.py --param1 {param1} --output {output}
 """
 
 if n_params == 1:

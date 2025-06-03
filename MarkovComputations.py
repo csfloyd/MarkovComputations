@@ -524,6 +524,14 @@ class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
             perceptron_output = torch.exp(log_probs)  # Convert back to probabilities
         
         return markov_ss_list, inputs_list, perceptron_output
+    
+    def compute_output(self, inputs):
+        """
+        Computes output probabilities for the given inputs using the Markov-Perceptron model.
+        Returns the perceptron output probabilities as a numpy array.
+        """
+        _, _, perceptron_output = self.compute_combined_output(inputs)
+        return perceptron_output.squeeze().detach().cpu().numpy()
 
     def compute_combined_gradients(self, inputs, target, markov_ss_list=None, inputs_list=None):
         """
@@ -666,13 +674,165 @@ class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
         # Update perceptron parameters using simple gradient descent
         self._perceptron_step(eta_perceptron)
 
-    def compute_output(self, inputs):
+    def zero_gradients(self):
+        """Initialize/zero accumulators for Markov and perceptron gradients."""
+        self.markov_grad_accum = {
+            'theta': [[np.zeros_like(wm.Ej_list), np.zeros_like(wm.Bij_list), np.zeros_like(wm.Fij_list)] for wm in self.weight_matrix_list],
+            'A': [np.zeros_like(A) for A in self.A_matrices_list],
+            'b': [np.zeros_like(b) for b in self.b_vectors_list]
+        }
+        self.perceptron_grad_accum = {name: torch.zeros_like(param) for name, param in self.perceptron.named_parameters()}
+
+    def compute_gradients_single(self, inputs, target, markov_ss_list=None, inputs_list=None):
+        """Compute gradients for a single sample."""
+        return self.compute_combined_gradients(inputs, target, markov_ss_list, inputs_list)
+
+    def accumulate_gradients(self, markov_grads, perceptron_grads):
+        """Add single-sample gradients to the running total."""
+        for l in range(self.L):
+            for i in range(3):
+                self.markov_grad_accum['theta'][l][i] += markov_grads['theta'][l][i]
+        for l in range(self.L - 1):
+            self.markov_grad_accum['A'][l] += markov_grads['A'][l]
+            self.markov_grad_accum['b'][l] += markov_grads['b'][l]
+        for name in self.perceptron_grad_accum:
+            self.perceptron_grad_accum[name] += perceptron_grads[name]
+
+    def apply_gradients(self, batch_size, eta_markov, eta_perceptron):
+        """Update parameters using the averaged gradients."""
+        # Average gradients and update Markov parameters
+        for l in range(self.L):
+            Ej_grad, Bij_grad, Fij_grad = [g / batch_size for g in self.markov_grad_accum['theta'][l]]
+            wm = self.weight_matrix_list[l]
+            new_Ej = wm.Ej_list - eta_markov * Ej_grad
+            new_Bij = wm.Bij_list - eta_markov * Bij_grad
+            new_Fij = wm.Fij_list - eta_markov * Fij_grad
+            wm.set_W_mat(new_Ej, new_Bij, new_Fij)
+        for l in range(self.L - 1):
+            self.A_matrices_list[l] -= eta_markov * (self.markov_grad_accum['A'][l] / batch_size)
+            self.b_vectors_list[l] -= eta_markov * (self.markov_grad_accum['b'][l] / batch_size)
+        # Average gradients and update perceptron parameters
+        with torch.no_grad():
+            for name, param in self.perceptron.named_parameters():
+                param -= eta_perceptron * (self.perceptron_grad_accum[name] / batch_size)
+
+    def apply_adam_gradients(self, batch_size, eta_markov, eta_perceptron, beta1, beta2, epsilon):
         """
-        Computes output probabilities for the given inputs using the Markov-Perceptron model.
-        Returns the perceptron output probabilities as a numpy array.
+        Update parameters using the Adam optimizer with batch-averaged gradients.
+        Maintains Adam state for each parameter.
         """
-        _, _, perceptron_output = self.compute_combined_output(inputs)
-        return perceptron_output.squeeze().detach().cpu().numpy()
+        # Initialize Adam state if not present
+        if not hasattr(self, 'adam_state'):
+            self.adam_state = {'t': 0, 'markov': {'theta': [], 'A': [], 'b': []}, 'perceptron': {}}
+            # Markov parameters
+            for l in range(self.L):
+                wm = self.weight_matrix_list[l]
+                self.adam_state['markov']['theta'].append([
+                    {'m': np.zeros_like(wm.Ej_list), 'v': np.zeros_like(wm.Ej_list)},
+                    {'m': np.zeros_like(wm.Bij_list), 'v': np.zeros_like(wm.Bij_list)},
+                    {'m': np.zeros_like(wm.Fij_list), 'v': np.zeros_like(wm.Fij_list)}
+                ])
+            for l in range(self.L - 1):
+                self.adam_state['markov']['A'].append({'m': np.zeros_like(self.A_matrices_list[l]), 'v': np.zeros_like(self.A_matrices_list[l])})
+                self.adam_state['markov']['b'].append({'m': np.zeros_like(self.b_vectors_list[l]), 'v': np.zeros_like(self.b_vectors_list[l])})
+            # Perceptron parameters
+            for name, param in self.perceptron.named_parameters():
+                self.adam_state['perceptron'][name] = {
+                    'm': torch.zeros_like(param),
+                    'v': torch.zeros_like(param)
+                }
+        # Increment timestep
+        self.adam_state['t'] += 1
+        t = self.adam_state['t']
+        # --- Markov parameters ---
+        for l in range(self.L):
+            Ej_grad, Bij_grad, Fij_grad = [g / batch_size for g in self.markov_grad_accum['theta'][l]]
+            wm = self.weight_matrix_list[l]
+            for i, (grad, param, state) in enumerate(zip([Ej_grad, Bij_grad, Fij_grad],
+                                                         [wm.Ej_list, wm.Bij_list, wm.Fij_list],
+                                                         self.adam_state['markov']['theta'][l])):
+                # Update moments
+                state['m'] = beta1 * state['m'] + (1 - beta1) * grad
+                state['v'] = beta2 * state['v'] + (1 - beta2) * (grad ** 2)
+                m_hat = state['m'] / (1 - beta1 ** t)
+                v_hat = state['v'] / (1 - beta2 ** t)
+                # Adam update
+                param -= eta_markov * m_hat / (np.sqrt(v_hat) + epsilon)
+            # Set updated parameters
+            wm.set_W_mat(wm.Ej_list, wm.Bij_list, wm.Fij_list)
+        for l in range(self.L - 1):
+            A_grad = self.markov_grad_accum['A'][l] / batch_size
+            b_grad = self.markov_grad_accum['b'][l] / batch_size
+            A_state = self.adam_state['markov']['A'][l]
+            b_state = self.adam_state['markov']['b'][l]
+            # Update moments for A
+            A_state['m'] = beta1 * A_state['m'] + (1 - beta1) * A_grad
+            A_state['v'] = beta2 * A_state['v'] + (1 - beta2) * (A_grad ** 2)
+            m_hat_A = A_state['m'] / (1 - beta1 ** t)
+            v_hat_A = A_state['v'] / (1 - beta2 ** t)
+            self.A_matrices_list[l] -= eta_markov * m_hat_A / (np.sqrt(v_hat_A) + epsilon)
+            # Update moments for b
+            b_state['m'] = beta1 * b_state['m'] + (1 - beta1) * b_grad
+            b_state['v'] = beta2 * b_state['v'] + (1 - beta2) * (b_grad ** 2)
+            m_hat_b = b_state['m'] / (1 - beta1 ** t)
+            v_hat_b = b_state['v'] / (1 - beta2 ** t)
+            self.b_vectors_list[l] -= eta_markov * m_hat_b / (np.sqrt(v_hat_b) + epsilon)
+        # --- Perceptron parameters ---
+        with torch.no_grad():
+            for name, param in self.perceptron.named_parameters():
+                grad = self.perceptron_grad_accum[name] / batch_size
+                state = self.adam_state['perceptron'][name]
+                # Update moments
+                state['m'] = beta1 * state['m'] + (1 - beta1) * grad
+                state['v'] = beta2 * state['v'] + (1 - beta2) * (grad ** 2)
+                m_hat = state['m'] / (1 - beta1 ** t)
+                v_hat = state['v'] / (1 - beta2 ** t)
+                # Adam update
+                param -= eta_perceptron * m_hat / (torch.sqrt(v_hat) + epsilon)
+
+    def compute_input_gradient(self, inputs, class_idx):
+        """
+        Computes the gradient of the perceptron output (for class_idx) with respect to the input vector.
+        Args:
+            inputs: input vector (numpy array or torch tensor)
+            class_idx: integer, class index to maximize
+        Returns:
+            grad: numpy array, gradient of class prediction wrt input vector
+        """
+        # Ensure input is a torch tensor with gradients enabled
+        if not torch.is_tensor(inputs):
+            inputs = torch.tensor(inputs, dtype=torch.float32, requires_grad=True)
+        else:
+            inputs = inputs.clone().detach().requires_grad_(True)
+
+        # Forward pass through Markov layers (using numpy, so detach and re-wrap as torch)
+        ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs.detach().cpu().numpy())
+        final_ss = np.array(ss_list[-1])
+        markov_outputs = torch.tensor([final_ss[i] for i in self.external_output_inds], dtype=torch.float32).unsqueeze(0)
+        markov_outputs.requires_grad_(True)
+
+        self.perceptron.eval()
+        output = self.perceptron(markov_outputs)
+        prob = torch.exp(output)[0, class_idx]
+     
+        # Backpropagate to markov_outputs
+        self.perceptron.zero_grad()
+        prob.backward(retain_graph=True)
+        dprob_dmarkov = markov_outputs.grad.clone().detach().cpu().numpy()[0]
+
+
+        dpiL_dthetal_lists, _, _ = self.stacked_derivatives_of_ss(ss_list, inputs_list)
+        full_inds = self.external_input_inds
+        n_nodes = self.weight_matrix_list[-1].n_nodes
+        dpiL_dInputs = np.zeros((n_nodes, len(inputs)))
+        for m, inds in enumerate(full_inds):  # Iterate over columns
+            dpiL_dInputs[:, m] = np.sum(
+                [dpiL_dthetal_lists[0][2][:, ind] for ind in inds], axis=0)
+        dpioL_dInputs = dpiL_dInputs[self.external_output_inds, :]
+
+        grad = np.dot(dprob_dmarkov, dpioL_dInputs)
+        return grad
+
 
 
 class InputData:
@@ -948,4 +1108,39 @@ def get_spanning_trees(n_nodes,edge_w,N_trees,maximum=True):
     return (span_trees_roots, span_trees)
 
 
+def append_r_before_slash(path, id=1):
+    """
+    Insert '_r' before the slash at the given index (from the right, like rfind).
+    id = -1 means the last slash, -2 the second-to-last, etc.
+    """
+    # Find all slash positions
+    slash_indices = [i for i, c in enumerate(path) if c == '/']
+    if not slash_indices or abs(id) > len(slash_indices):
+        # If id is out of range, just append at the end
+        return path + '_r'
+    idx = slash_indices[id]
+    return path[:idx] + '_r' + path[idx:]
+
+
+def compute_flux_and_frenesy_stacked(stacked_wm, inputs):
+    """
+    For a StackedWeightMatrices object and input vector, compute for each layer and each edge:
+      - flux: J_{i->j} = pi_i * W_ij - pi_j * W_ji
+      - frenesy: F_{i->j} = pi_i * W_ij + pi_j * W_ji
+    Returns a list (one per layer) of dicts with keys: 'edge', 'flux', 'frenesy'.
+    """
+    results = []
+    # Get steady states for all layers
+    ss_list, _ = stacked_wm.compute_stacked_ss_on_inputs(inputs)
+    for l, wm in enumerate(stacked_wm.weight_matrix_list):
+        pi = np.array(ss_list[l])
+        edge_array = wm.edge_array
+        W_mat = wm.W_mat
+        layer_result = []
+        for idx, (i, j) in enumerate(edge_array):
+            flux = pi[i] * W_mat[i, j] - pi[j] * W_mat[j, i]
+            frenesy = pi[i] * W_mat[i, j] + pi[j] * W_mat[j, i]
+            layer_result.append({'edge': (i, j), 'flux': flux, 'frenesy': frenesy})
+        results.append(layer_result)
+    return results
 

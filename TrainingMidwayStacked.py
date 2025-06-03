@@ -49,14 +49,14 @@ from MarkovComputations import StackedWeightMatrices, WeightMatrix, InputData, g
 random.seed(10)
 
 ### Define parameters of classification
-M = args.param1 # how many edges affected per input dimension
+M = 10 # how many edges affected per input dimension
 #M = 3
-
+#M = args.param1
 # n_classes = 5 # D, how many classes
 
 classes = [0,1,6,7,8]
-#classes = [0,7]
-#classes = [0,1,2,3,4,5,6,7,8,9]
+#classes = [0,7,8]
+classes = [0,1,2,3,4,5,6,7,8,9]
 n_classes = len(classes)
 
 #input_dim = 14**2 # D, how many components of each input data
@@ -65,19 +65,21 @@ n_classes = len(classes)
 input_dim = 14**2
 
 ### Define parameters of graph object and initial weights
-n_nodes = 50 # assuming a complete graph
+#n_nodes = 75 # assuming a complete graph
+n_nodes = args.param1
 E_range = 0 # range of uniform distribution for Ej, etc.
 B_range = 0
 F_range = 0
 
 #dim = args.param1
-dim = 20
+#dim = 50
+dim = 30
 L = 2
 external_input_dim = input_dim
 external_output_dim = n_classes
 
 if L == 2:
-    internal_input_dims = [dim+2]
+    internal_input_dims = [dim+10]
     internal_output_dims = [dim]
     M_vals = [M for l in range(L)]
     n_nodes_list = [n_nodes for l in range(L)]
@@ -88,12 +90,12 @@ if L == 1:
     M_vals = [M for l in range(L)]
     n_nodes_list = [n_nodes for l in range(L)]
 
-A_fac = 20
+A_fac = 10
 b_fac = 0
 
 ### Define parameters of trainig
-n_training_iters = 1000 # how many training steps to take
-eta = 2 # learning rate (increment of Ej, Bij, Fij)
+n_training_iters = 5000 # how many training steps to take
+eta = 1 # learning rate (increment of Ej, Bij, Fij)
 
 
 rand_output_bool = False
