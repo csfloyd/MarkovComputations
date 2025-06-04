@@ -53,8 +53,8 @@ random.seed(10)
 
 ### Define parameters of classification
 #M = 10 # how many edges affected per input dimension
-#M = 5
-M = args.param1
+M = 4
+#M = args.param1
 # n_classes = 5 # D, how many classes
 
 classes = [0,1,6,7,8]
@@ -79,8 +79,8 @@ F_range = 0
 dim = 30
 L = 1
 external_input_dim = input_dim
-external_output_dim = 20
-#external_output_dim = args.param1
+#external_output_dim = 20
+external_output_dim = args.param1
 
 if L == 2:
     internal_input_dims = [dim+10]
@@ -176,14 +176,14 @@ else:
 ################  Run training #################
 ################################################
 ### Define parameters of trainig
-n_training_iters = 5000 # how many training steps to take
+n_training_iters = 10000 # how many training steps to take
 batch_size = 10
 accuracy_stride = 20
 
 # eta_markov = 4
 # eta_perceptron = 1  # Typically want smaller learning rate for neural networks
-eta_markov = 5e-3
-eta_perceptron = 5e-3  # Typically want smaller learning rate for neural networks
+eta_markov = 2e-3
+eta_perceptron = 2e-3  # Typically want smaller learning rate for neural networks
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 1e-8

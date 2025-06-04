@@ -38,20 +38,22 @@ output_dir = args.output
 
 
 ## here are the user-defined functions and classes
-from MarkovComputations import StackedWeightMatrices, WeightMatrix, InputData, get_input_inds, get_output_inds, random_initial_parameters, compute_error, downsample_avg, load_and_format_mnist, load_and_format_iris, evaluate_accuracy, evaluate_accuracy_stacked, evaluate_accuracy_per_class
+from MarkovComputations import *
 
 
 #########################################################
 ################  Parameter definitions #################
 #########################################################
 
+restart_bool = False
+
 #random.seed(args.param1)
 random.seed(10)
 
 ### Define parameters of classification
-M = 10 # how many edges affected per input dimension
+#M = 10 # how many edges affected per input dimension
 #M = 3
-#M = args.param1
+M = args.param1
 # n_classes = 5 # D, how many classes
 
 classes = [0,1,6,7,8]
@@ -66,7 +68,7 @@ input_dim = 14**2
 
 ### Define parameters of graph object and initial weights
 #n_nodes = 75 # assuming a complete graph
-n_nodes = args.param1
+n_nodes = 65
 E_range = 0 # range of uniform distribution for Ej, etc.
 B_range = 0
 F_range = 0
@@ -74,9 +76,10 @@ F_range = 0
 #dim = args.param1
 #dim = 50
 dim = 30
-L = 2
+L = 1
 external_input_dim = input_dim
 external_output_dim = n_classes
+rand_output_bool = False
 
 if L == 2:
     internal_input_dims = [dim+10]
@@ -92,34 +95,6 @@ if L == 1:
 
 A_fac = 10
 b_fac = 0
-
-### Define parameters of trainig
-n_training_iters = 5000 # how many training steps to take
-eta = 1 # learning rate (increment of Ej, Bij, Fij)
-
-
-rand_output_bool = False
-
-####################################################################
-################  Initialize stacked weight_matrix #################
-####################################################################
-
-weight_matrix_list = []
-for l in range(L):
-    n_nodes = n_nodes_list[l]
-    g = nx.complete_graph(n_nodes)
-    n_edges = len(list(g.edges())) 
-    Ej_list, Bij_list, Fij_list = random_initial_parameters(E_range, B_range, F_range, n_nodes, n_edges)
-    weight_matrix_list.append(WeightMatrix(g, Ej_list, Bij_list, Fij_list))
-
-    
-external_input_inds = get_input_inds(n_edges, input_dim, M)
-stacked_weight_matrices = StackedWeightMatrices(weight_matrix_list, 
-                                                [external_input_dim, external_output_dim],
-                                                [internal_input_dims, internal_output_dims],
-                                                M_vals, A_fac, b_fac, rand_output_bool)
-
-# stacked_weight_matrices.weight_matrix_list[-1].lower_output_energies(stacked_weight_matrices.external_output_inds, 4) # lower energies at the output nodes to ease training
 
 
 ############################################################
@@ -146,39 +121,94 @@ dist_2 = np.random.multivariate_normal(mu_2, cov_2, n_samples)
 ###  create InputData object
 #input_data = InputData(n_classes, data_list)
 
+####################################################################
+################  Initialize stacked weight_matrix #################
+####################################################################
+
+if not restart_bool:
+    weight_matrix_list = []
+    for l in range(L):
+        n_nodes = n_nodes_list[l]
+        g = nx.complete_graph(n_nodes)
+        n_edges = len(list(g.edges())) 
+        Ej_list, Bij_list, Fij_list = random_initial_parameters(E_range, B_range, F_range, n_nodes, n_edges)
+        weight_matrix_list.append(WeightMatrix(g, Ej_list, Bij_list, Fij_list))
+
+        
+    external_input_inds = get_input_inds(n_edges, input_dim, M)
+    stacked_weight_matrices = StackedWeightMatrices(weight_matrix_list, 
+                                                    [external_input_dim, external_output_dim],
+                                                    [internal_input_dims, internal_output_dims],
+                                                    M_vals, A_fac, b_fac, rand_output_bool)
+    error_list = [] # track errors during training
+    accuracy_list = [] # track errors during training
+else:
+    rep_dir = append_r_before_slash(output_dir, id = -1)
+    with open(rep_dir + "/SavedData.pkl", "rb") as file:
+        stacked_weight_matrices, input_data, accuracy_list, error_list = pickle.load(file)
 
 
 ################################################
 ################  Run training #################
 ################################################
 
-
-error_list = [] # track errors during training
-accuracy_list = [] # track errors during training
+### Define parameters of trainig
+n_training_iters = 10000  # how many training steps to take
+batch_size = 10        # set your batch size
 accuracy_stride = 20
+
+eta_markov = 5e-2
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1e-8
+
 
 print("Starting training.")
 
 start_time = time.time()
 for training_iter in range(n_training_iters):
 
-    class_number = random.randrange(n_classes) # draw a random class label to present
+    stacked_weight_matrices.zero_gradients()  # Zero the accumulators at the start of each batch
 
-    try:
-        inputs = next(input_data.training_data[class_number])
-    except StopIteration:
-        input_data.refill_iterators()  # Refill iterators if exhausted
-        inputs = next(input_data.training_data[class_number])  # Try again
+    for _ in range(batch_size):
+        class_number = random.randrange(n_classes)  # draw a random class label to present
 
-    ss_list, inputs_list = stacked_weight_matrices.compute_stacked_ss_on_inputs(inputs)
-    error_list.append(np.linalg.norm(compute_error(ss_list[-1], input_data, class_number, stacked_weight_matrices.external_output_inds))) # save error of this iteration
+        try:
+            inputs = next(input_data.training_data[class_number])
+        except StopIteration:
+            input_data.refill_iterators()
+            inputs = next(input_data.training_data[class_number])
 
-    if (training_iter % accuracy_stride == 0): # compute accuracy for list
-        accuracy_list.append(evaluate_accuracy_stacked(stacked_weight_matrices, input_data, n_classes, 100))
+        # Compute gradients for this sample
+        markov_grads = stacked_weight_matrices.compute_gradients_single(inputs, class_number)
+        # Accumulate gradients
+        stacked_weight_matrices.accumulate_gradients(markov_grads)
 
-    
-    stacked_weight_matrices.update(ss_list, inputs_list, class_number, eta) # update the weight_matrices
+        # Optionally, you can compute and store the error for this sample
+        ss_list, inputs_list = stacked_weight_matrices.compute_stacked_ss_on_inputs(inputs)
+        error_list.append(
+            np.linalg.norm(
+                compute_error(ss_list[-1], input_data, class_number, stacked_weight_matrices.external_output_inds)
+            )
+        )
 
+    #print(stacked_weight_matrices.markov_grad_accum['theta'][0])
+    # After accumulating over the batch, apply the Adam optimizer update
+    stacked_weight_matrices.apply_adam_gradients(
+        batch_size, eta_markov, adam_beta1, adam_beta2, adam_epsilon
+    )
+
+    # stacked_weight_matrices.apply_gradients(
+    #     batch_size, eta_markov
+    # )
+    #print(stacked_weight_matrices.weight_matrix_list[0].Ej_list)
+
+     # Compute accuracy using the perceptron-based network
+    if (training_iter % accuracy_stride == 0):
+        print(training_iter)
+        accuracy_list.append(
+            evaluate_accuracy(stacked_weight_matrices, input_data, n_classes, 100)
+        )
     
 
 end_time = time.time()

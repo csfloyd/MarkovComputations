@@ -430,6 +430,131 @@ class StackedWeightMatrices:
         probs = np.array([ss_list[-1][out] for out in self.external_output_inds])
         return probs
 
+    def zero_gradients(self):
+        """Initialize/zero accumulators for Markov gradients."""
+        self.markov_grad_accum = {
+            'theta': [[np.zeros_like(wm.Ej_list), np.zeros_like(wm.Bij_list), np.zeros_like(wm.Fij_list)] for wm in self.weight_matrix_list],
+            'A': [np.zeros_like(A) for A in self.A_matrices_list],
+            'b': [np.zeros_like(b) for b in self.b_vectors_list]
+        }
+
+    def compute_gradients_single(self, inputs, target, markov_ss_list=None, inputs_list=None):
+        """Compute gradients for a single sample (target is class index)."""
+        # Forward pass
+        if markov_ss_list is None or inputs_list is None:
+            markov_ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+        dpiL_dthetal_lists, dpiL_dAl_lists, dpiL_dbl_lists = self.stacked_derivatives_of_ss(markov_ss_list, inputs_list)
+        out_ind = self.external_output_inds[target]
+        fac = 1 / (markov_ss_list[self.L-1][out_ind])
+        markov_gradients = {
+            'theta': [],
+            'A': [],
+            'b': []
+        }
+        for l in range(self.L):
+            dpiL_dthetal = dpiL_dthetal_lists[l]
+            Ej_grad = fac * dpiL_dthetal[0][out_ind]
+            Bij_grad = fac * dpiL_dthetal[1][out_ind]
+            Fij_grad = fac * dpiL_dthetal[2][out_ind]
+            markov_gradients['theta'].append([Ej_grad, Bij_grad, Fij_grad])
+        for l in range(self.L-1):
+            A_grad = fac * dpiL_dAl_lists[l][out_ind]
+            b_grad = fac * dpiL_dbl_lists[l][out_ind]
+            markov_gradients['A'].append(A_grad)
+            markov_gradients['b'].append(b_grad)
+        return markov_gradients
+
+    def accumulate_gradients(self, markov_grads):
+        """Add single-sample gradients to the running total."""
+        for l in range(self.L):
+            for i in range(3):
+                self.markov_grad_accum['theta'][l][i] += markov_grads['theta'][l][i]
+        for l in range(self.L - 1):
+            self.markov_grad_accum['A'][l] += markov_grads['A'][l]
+            self.markov_grad_accum['b'][l] += markov_grads['b'][l]
+
+    def apply_gradients(self, batch_size, eta_markov):
+        """Update parameters using the averaged gradients."""
+        for l in range(self.L):
+            Ej_grad, Bij_grad, Fij_grad = [g / batch_size for g in self.markov_grad_accum['theta'][l]]
+            wm = self.weight_matrix_list[l]
+            new_Ej = wm.Ej_list + eta_markov * Ej_grad
+            new_Bij = wm.Bij_list + eta_markov * Bij_grad
+            new_Fij = wm.Fij_list + eta_markov * Fij_grad
+            wm.set_W_mat(new_Ej, new_Bij, new_Fij)
+        for l in range(self.L - 1):
+            self.A_matrices_list[l] += eta_markov * (self.markov_grad_accum['A'][l] / batch_size)
+            self.b_vectors_list[l] += eta_markov * (self.markov_grad_accum['b'][l] / batch_size)
+
+    def apply_adam_gradients(self, batch_size, eta_markov, beta1, beta2, epsilon):
+        """
+        Update parameters using the Adam optimizer with batch-averaged gradients.
+        Maintains Adam state for each parameter.
+        """
+        # Initialize Adam state if not present
+        if not hasattr(self, 'adam_state'):
+            self.adam_state = {'t': 0, 'markov': {'theta': [], 'A': [], 'b': []}, 'perceptron': {}}
+            # Markov parameters
+            for l in range(self.L):
+                wm = self.weight_matrix_list[l]
+                self.adam_state['markov']['theta'].append([
+                    {'m': np.zeros_like(wm.Ej_list), 'v': np.zeros_like(wm.Ej_list)},
+                    {'m': np.zeros_like(wm.Bij_list), 'v': np.zeros_like(wm.Bij_list)},
+                    {'m': np.zeros_like(wm.Fij_list), 'v': np.zeros_like(wm.Fij_list)}
+                ])
+            for l in range(self.L - 1):
+                self.adam_state['markov']['A'].append({'m': np.zeros_like(self.A_matrices_list[l]), 'v': np.zeros_like(self.A_matrices_list[l])})
+                self.adam_state['markov']['b'].append({'m': np.zeros_like(self.b_vectors_list[l]), 'v': np.zeros_like(self.b_vectors_list[l])})
+        # Increment timestep
+        self.adam_state['t'] += 1
+        t = self.adam_state['t']
+        # --- Markov parameters ---
+        for l in range(self.L):
+            Ej_grad, Bij_grad, Fij_grad = [g / batch_size for g in self.markov_grad_accum['theta'][l]]
+            wm = self.weight_matrix_list[l]
+            # Explicit Adam update for Ej_list
+            state_Ej = self.adam_state['markov']['theta'][l][0]
+            state_Ej['m'] = beta1 * state_Ej['m'] + (1 - beta1) * Ej_grad
+            state_Ej['v'] = beta2 * state_Ej['v'] + (1 - beta2) * (Ej_grad ** 2)
+            m_hat_Ej = state_Ej['m'] / (1 - beta1 ** t)
+            v_hat_Ej = state_Ej['v'] / (1 - beta2 ** t)
+            wm.Ej_list = wm.Ej_list + eta_markov * m_hat_Ej / (np.sqrt(v_hat_Ej) + epsilon)
+            # Explicit Adam update for Bij_list
+            state_Bij = self.adam_state['markov']['theta'][l][1]
+            state_Bij['m'] = beta1 * state_Bij['m'] + (1 - beta1) * Bij_grad
+            state_Bij['v'] = beta2 * state_Bij['v'] + (1 - beta2) * (Bij_grad ** 2)
+            m_hat_Bij = state_Bij['m'] / (1 - beta1 ** t)
+            v_hat_Bij = state_Bij['v'] / (1 - beta2 ** t)
+            wm.Bij_list = wm.Bij_list + eta_markov * m_hat_Bij / (np.sqrt(v_hat_Bij) + epsilon)
+            # Explicit Adam update for Fij_list
+            state_Fij = self.adam_state['markov']['theta'][l][2]
+            state_Fij['m'] = beta1 * state_Fij['m'] + (1 - beta1) * Fij_grad
+            state_Fij['v'] = beta2 * state_Fij['v'] + (1 - beta2) * (Fij_grad ** 2)
+            m_hat_Fij = state_Fij['m'] / (1 - beta1 ** t)
+            v_hat_Fij = state_Fij['v'] / (1 - beta2 ** t)
+            wm.Fij_list = wm.Fij_list + eta_markov * m_hat_Fij / (np.sqrt(v_hat_Fij) + epsilon)
+            # Set updated parameters
+            #print(wm.Ej_list)
+            wm.set_W_mat(wm.Ej_list, wm.Bij_list, wm.Fij_list)
+            #print(wm.Ej_list)
+        for l in range(self.L - 1):
+            A_grad = self.markov_grad_accum['A'][l] / batch_size
+            b_grad = self.markov_grad_accum['b'][l] / batch_size
+            A_state = self.adam_state['markov']['A'][l]
+            b_state = self.adam_state['markov']['b'][l]
+            # Update moments for A
+            A_state['m'] = beta1 * A_state['m'] + (1 - beta1) * A_grad
+            A_state['v'] = beta2 * A_state['v'] + (1 - beta2) * (A_grad ** 2)
+            m_hat_A = A_state['m'] / (1 - beta1 ** t)
+            v_hat_A = A_state['v'] / (1 - beta2 ** t)
+            self.A_matrices_list[l] += eta_markov * m_hat_A / (np.sqrt(v_hat_A) + epsilon)
+            # Update moments for b
+            b_state['m'] = beta1 * b_state['m'] + (1 - beta1) * b_grad
+            b_state['v'] = beta2 * b_state['v'] + (1 - beta2) * (b_grad ** 2)
+            m_hat_b = b_state['m'] / (1 - beta1 ** t)
+            v_hat_b = b_state['v'] / (1 - beta2 ** t)
+            self.b_vectors_list[l] += eta_markov * m_hat_b / (np.sqrt(v_hat_b) + epsilon)
+
 
 class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
     """
