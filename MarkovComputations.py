@@ -576,6 +576,25 @@ class StackedWeightMatrices:
                 [dpiL_dthetal_lists[0][2][:, ind] for ind in inds], axis=0)
         return dpiL_dInputs
 
+    def compute_MI_input_gradient(self, input_data, n_nodes, n_classes, n_samples=1000):
+        """
+        Compute the gradient of the mutual information between the input and the output.
+        Only works for L = 1 (single layer).
+        """
+        
+        marginal_ss = self.compute_marginal_distribution(input_data, n_nodes, n_classes, n_samples)
+        for sample in range(n_samples):
+            class_number = random.randrange(n_classes)
+            inputs = input_data.get_next_training_sample(class_number)
+            ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+            dpiL_dInputs = self.compute_input_gradient(inputs)
+            fac = np.log(ss_list[-1] / marginal_ss) + 1
+            if sample == 0:
+                mi_grad = fac * dpiL_dInputs
+            else:
+                mi_grad += fac * dpiL_dInputs
+        mi_grad /= n_samples
+        return mi_grad
 
     def compute_marginal_distribution(self, input_data, n_nodes, n_classes, n_samples=1000):
         """Compute the marginal steady state distribution by sampling from input data.
@@ -601,6 +620,27 @@ class StackedWeightMatrices:
 
         marginal_ss /= n_samples
         return marginal_ss
+    
+    def compute_mi_density_input_gradient(self, inputs, marginal_ss):
+        """
+        Compute the gradient of the mutual information between the input and the output.
+        Only works for L = 1 (single layer).
+        """
+
+
+        ss_list, _ = self.compute_stacked_ss_on_inputs(inputs)
+        dpiL_dInputs = self.compute_input_gradient(inputs)
+        fac = np.log(ss_list[-1] / marginal_ss) + 1
+        dots = [fac * dpiL_dInputs[:,l] for l in range(np.shape(dpiL_dInputs)[1])]
+        return [np.sum(dots[l]) for l in range(np.shape(dots)[0])]
+
+    def compute_mi_density(self, inputs, marginal_ss):
+        """
+        Compute the gradient of the mutual information between the input and the output.
+        Only works for L = 1 (single layer).
+        """
+        ss_list, _ = self.compute_stacked_ss_on_inputs(inputs)
+        return np.sum(ss_list[-1] * np.log(ss_list[-1] / marginal_ss))
 
     def compute_MI(self, input_data, n_nodes, n_classes, n_samples=1000):
         """Compute the mutual information between the input and the output.
