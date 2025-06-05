@@ -71,7 +71,7 @@ class WeightMatrix:
     @partial(jax.jit)
     def get_steady_state(A, zero_array):
         """Computes the steady-state distribution using conjugate gradient solver."""
-        x, *_ = jax.scipy.sparse.linalg.cg(A.T @ A, A.T @ zero_array, tol=1e-10, maxiter=100000)
+        x, *_ = jax.scipy.sparse.linalg.cg(A.T @ A, A.T @ zero_array, tol=1e-8, maxiter=100000)
         return x
 
     def current_steady_state(self):
@@ -255,6 +255,8 @@ class WeightMatrix:
         ss = self.compute_ss_on_inputs(input_inds, inputs)
         probs = np.array([ss[out] for out in output_inds])
         return probs
+    
+    
 
 
 class StackedWeightMatrices:
@@ -554,6 +556,131 @@ class StackedWeightMatrices:
             m_hat_b = b_state['m'] / (1 - beta1 ** t)
             v_hat_b = b_state['v'] / (1 - beta2 ** t)
             self.b_vectors_list[l] += eta_markov * m_hat_b / (np.sqrt(v_hat_b) + epsilon)
+
+    def compute_input_gradient(self, inputs):
+        """
+        Computes the gradient of the perceptron output (for class_idx) with respect to the input vector.
+        Args:
+            inputs: input vector (numpy array or torch tensor)
+            class_idx: integer, class index to maximize
+        Returns:
+            grad: numpy array, gradient of class prediction wrt input vector
+        """
+        ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+        dpiL_dthetal_lists, _, _ = self.stacked_derivatives_of_ss(ss_list, inputs_list)
+        full_inds = self.external_input_inds
+        n_nodes = self.weight_matrix_list[-1].n_nodes
+        dpiL_dInputs = np.zeros((n_nodes, len(inputs)))
+        for m, inds in enumerate(full_inds):  # Iterate over columns
+            dpiL_dInputs[:, m] = np.sum(
+                [dpiL_dthetal_lists[0][2][:, ind] for ind in inds], axis=0)
+        return dpiL_dInputs
+
+
+    def compute_marginal_distribution(self, input_data, n_nodes, n_classes, n_samples=1000):
+        """Compute the marginal steady state distribution by sampling from input data.
+        
+        Args:
+            stacked_weight_matrices: StackedWeightMatrices object
+            input_data: InputData object containing training data
+            n_nodes: Number of nodes in the network
+            n_classes: Number of classes in the input data
+            n_samples: Number of samples to use for computing marginal (default 1000)
+            
+        Returns:
+            marginal_ss: Marginal steady state distribution averaged over samples
+        """
+        marginal_ss = np.zeros(n_nodes)
+        for _ in range(n_samples):
+            class_number = random.randrange(n_classes)  # draw a random class label to present
+            inputs = input_data.get_next_training_sample(class_number)
+
+            ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+
+            marginal_ss += ss_list[-1]
+
+        marginal_ss /= n_samples
+        return marginal_ss
+
+    def compute_MI(self, input_data, n_nodes, n_classes, n_samples=1000):
+        """Compute the mutual information between the input and the output.
+        
+        Args:
+            stacked_weight_matrices: StackedWeightMatrices object
+            input_data: InputData object containing training data
+            n_nodes: Number of nodes in the network
+            n_classes: Number of classes in the input data
+            n_samples: Number of samples to use for computing MI (default 1000)
+            
+        Returns:
+            mi: Mutual information in bits between input and output
+        """
+        marginal_ss = self.compute_marginal_distribution(input_data, n_nodes, n_classes, n_samples)
+        mi = 0
+        for _ in range(n_samples):
+            class_number = random.randrange(n_classes)  # draw a random class label to present
+            inputs = input_data.get_next_training_sample(class_number)
+
+            ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+            mi += np.sum(ss_list[-1] * np.log(ss_list[-1] / marginal_ss))
+
+        mi /= n_samples
+        return mi / np.log(2) # return in bits
+    
+    def compute_MI_gradient(self, input_data, n_classes, n_samples=1000):
+        """
+        Compute the gradient of the mutual information between the input and the output.
+        Only works for L = 1 (single layer).
+        """
+        # First pass: accumulate marginal steady state and marginal gradients
+        marginal_ss = None
+        marginal_grads = None
+        for sample in range(n_samples):
+            class_number = random.randrange(n_classes)
+            inputs = input_data.get_next_training_sample(class_number)
+
+            ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+            dpiL_dthetal_lists, _, _ = self.stacked_derivatives_of_ss(ss_list, inputs_list)
+            grad = dpiL_dthetal_lists[-1]  # [dE, dB, dF], each shape (n_nodes, param_dim)
+            ss = ss_list[-1]               # steady state vector, shape (n_nodes,)
+
+            if sample == 0:
+                marginal_ss = np.array(ss, dtype=np.float64)
+                marginal_grads = [np.array(g, dtype=np.float64) for g in grad]
+            else:
+                marginal_ss += ss
+                for i in range(len(marginal_grads)):
+                    marginal_grads[i] += grad[i]
+
+        marginal_ss /= n_samples
+        marginal_grads = [g / n_samples for g in marginal_grads]
+
+        # Second pass: accumulate MI gradient
+        mi_grad = [0.0 for _ in marginal_grads]  # one for each parameter type
+        for sample in range(n_samples):
+            class_number = random.randrange(n_classes)
+            inputs = input_data.get_next_training_sample(class_number)
+            ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
+            dpiL_dthetal_lists, _, _ = self.stacked_derivatives_of_ss(ss_list, inputs_list)
+            grad = dpiL_dthetal_lists[-1]  # [dE, dB, dF], each shape (n_nodes, param_dim)
+            ss = ss_list[-1]
+
+            log_ratio = np.log(ss / marginal_ss)
+            ratio = ss / marginal_ss
+
+            for i in range(len(mi_grad)):
+                # grad[i] and marginal_grads[i] are (n_nodes, param_dim)
+                # log_ratio and ratio are (n_nodes,)
+                # We want to sum over n_nodes: (n_nodes,) * (n_nodes, param_dim) -> (param_dim,)
+                term_1 = np.sum(log_ratio[:, None] * grad[i], axis=0)
+                term_2 = np.sum(ratio[:, None] * marginal_grads[i], axis=0)
+                mi_grad[i] += term_1 - term_2
+
+        mi_grad = [g / n_samples for g in mi_grad]
+        return tuple(mi_grad)
+    
+    
+
 
 
 class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
@@ -999,6 +1126,14 @@ class InputData:
         """Refills the training and testing iterators from data_list."""
         self.training_data, self.testing_data = self._split_shuffle_data(self.data_list, self.split_fac)
 
+    def get_next_training_sample(self, class_number):
+        """Returns the next training sample for the given class, refilling iterators as needed."""
+        try:
+            return next(self.training_data[class_number])
+        except StopIteration:
+            self.refill_iterators()
+            return next(self.training_data[class_number])
+
 
 def compute_soft_maxed_output(ss, output_inds):
     """
@@ -1269,3 +1404,89 @@ def compute_flux_and_frenesy_stacked(stacked_wm, inputs):
         results.append(layer_result)
     return results
 
+
+
+def train_mi_conjugate_gradient(
+        stacked_weight_matrices,
+        input_data,
+        n_nodes,
+        n_classes,
+        n_samples=1000,
+        n_epochs=100,
+        step_size=1e-2,
+        tol=1e-6,
+        verbose=True
+    ):
+        """
+        Train stacked_weight_matrices to maximize MI using conjugate gradient on Markov parameters.
+        Only updates Ej_list, Bij_list, Fij_list for each layer.
+        """
+        # Initialize previous gradients and directions
+        prev_grads = None
+        prev_dirs = None
+
+        mi_list = []
+        for epoch in range(n_epochs):
+            # Compute MI gradient (tuple of arrays for each param type)
+            mi_grads = stacked_weight_matrices.compute_MI_gradient(input_data, n_classes, n_samples)
+            mi = stacked_weight_matrices.compute_MI(input_data, n_nodes, n_classes, n_samples)
+            mi_list.append(mi)
+            # mi_grads: [dE, dB, dF] for each layer (for L=1, just one set)
+
+            # Flatten all gradients for CG direction calculation
+            flat_grads = []
+            for l, (dE, dB, dF) in enumerate([mi_grads]):
+                flat_grads.append(np.concatenate([dE.flatten(), dB.flatten(), dF.flatten()]))
+            flat_grads = np.concatenate(flat_grads)
+
+            # Compute conjugate direction
+            if prev_grads is None:
+                direction = flat_grads
+            else:
+                # Polak–Ribiere formula
+                y = flat_grads - prev_grads
+                beta = np.dot(flat_grads, y) / (np.dot(prev_grads, prev_grads) + 1e-12)
+                direction = flat_grads + beta * prev_dirs
+
+            # Unflatten direction into parameter shapes
+            offset = 0
+
+            wm = stacked_weight_matrices.weight_matrix_list[-1]
+            # Shapes
+            E_shape = wm.Ej_list.shape
+            B_shape = wm.Bij_list.shape
+            F_shape = wm.Fij_list.shape
+            E_size = np.prod(E_shape)
+            B_size = np.prod(B_shape)
+            F_size = np.prod(F_shape)
+
+            # Extract direction slices
+            dE_dir = direction[offset:offset+E_size].reshape(E_shape)
+            offset += E_size
+            dB_dir = direction[offset:offset+B_size].reshape(B_shape)
+            offset += B_size
+            dF_dir = direction[offset:offset+F_size].reshape(F_shape)
+            offset += F_size
+
+            # Update parameters (gradient ascent)
+            wm.set_W_mat(
+                wm.Ej_list + step_size * dE_dir,
+                wm.Bij_list + step_size * dB_dir,
+                wm.Fij_list + step_size * dF_dir
+            )
+
+            
+            # Check for convergence
+            grad_norm = np.linalg.norm(flat_grads)
+            if verbose:
+                print(f"Epoch {epoch+1}: grad_norm={grad_norm:.4e}")
+            if grad_norm < tol:
+                print("Converged.")
+                break
+
+            # Store for next iteration
+            prev_grads = flat_grads
+            prev_dirs = direction
+
+        print("Training complete.")
+        return mi_list

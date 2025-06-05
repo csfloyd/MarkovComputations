@@ -188,11 +188,6 @@ adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 1e-8
 
-# Adam optimizer hyperparameters
-adam_beta1 = 0.9
-adam_beta2 = 0.999
-adam_epsilon = 1e-8
-
 
 print("Starting training.")
 
