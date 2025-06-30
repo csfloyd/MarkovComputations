@@ -642,7 +642,7 @@ class StackedWeightMatrices:
         ss_list, _ = self.compute_stacked_ss_on_inputs(inputs)
         return np.sum(ss_list[-1] * np.log(ss_list[-1] / marginal_ss))
 
-    def compute_MI(self, input_data, n_nodes, n_classes, n_samples=1000):
+    def compute_MI(self, input_data, n_nodes, n_classes, n_samples=1000, moment = 1):
         """Compute the mutual information between the input and the output.
         
         Args:
@@ -662,7 +662,7 @@ class StackedWeightMatrices:
             inputs = input_data.get_next_training_sample(class_number)
 
             ss_list, inputs_list = self.compute_stacked_ss_on_inputs(inputs)
-            mi += np.sum(ss_list[-1] * np.log(ss_list[-1] / marginal_ss))
+            mi += np.sum(ss_list[-1] * np.log(ss_list[-1] / marginal_ss)) ** moment
 
         mi /= n_samples
         return mi / np.log(2) # return in bits
@@ -734,7 +734,8 @@ class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
                 M_vals, A_fac, b_fac,
                 perceptron_hidden_dims,  # List of hidden layer dimensions
                 perceptron_output_dim,   # Final output dimension
-                rand_bool=True):
+                rand_bool=True,
+                relu=True):
         """
         Initializes the combined Markov-Perceptron architecture.
 
@@ -748,6 +749,7 @@ class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
         - perceptron_hidden_dims: List of hidden layer dimensions for the perceptron
         - perceptron_output_dim: Output dimension of the perceptron
         - rand_bool: Whether to use random initialization
+        - relu: Whether to use ReLU activations in perceptron hidden layers (default True)
         """
         # Initialize the base StackedWeightMatrices
         super().__init__(weight_matrix_list, external_dims, internal_dims, 
@@ -757,24 +759,24 @@ class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
         self.perceptron_input_dim = len(self.external_output_inds)
         self.perceptron_hidden_dims = perceptron_hidden_dims
         self.perceptron_output_dim = perceptron_output_dim
+        self.relu = relu
         
         # Initialize the perceptron layers
-        self._init_perceptron(perceptron_hidden_dims, perceptron_output_dim)
+        self._init_perceptron(perceptron_hidden_dims, perceptron_output_dim, relu)
 
-    def _init_perceptron(self, hidden_dims, output_dim):
+    def _init_perceptron(self, hidden_dims, output_dim, relu=True):
         """
         Initializes the perceptron layers using PyTorch.
-        Creates a multi-layer perceptron with ReLU activations and log-softmax output.
+        Creates a multi-layer perceptron with optional ReLU activations and log-softmax output.
         """
         layers = []
         in_dim = self.perceptron_input_dim
 
         # Build hidden layers
         for hidden_dim in hidden_dims:
-            layers.extend([
-                torch.nn.Linear(in_dim, hidden_dim),
-                torch.nn.ReLU()
-            ])
+            layers.append(torch.nn.Linear(in_dim, hidden_dim))
+            if relu:
+                layers.append(torch.nn.ReLU())
             in_dim = hidden_dim
 
         # Add output layer with log-softmax activation for numerical stability
@@ -1082,7 +1084,7 @@ class StackedWeightMatricesWithPerceptron(StackedWeightMatrices):
                 # Adam update
                 param -= eta_perceptron * m_hat / (torch.sqrt(v_hat) + epsilon)
 
-    def compute_input_gradient(self, inputs, class_idx):
+    def compute_input_gradient_perceptron(self, inputs, class_idx):
         """
         Computes the gradient of the perceptron output (for class_idx) with respect to the input vector.
         Args:

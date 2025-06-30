@@ -47,6 +47,7 @@ from MarkovComputations import *
 #########################################################
 
 restart_bool = True
+relu_bool = False
 
 #random.seed(args.param1)
 random.seed(10)
@@ -80,7 +81,7 @@ dim = 30
 L = 1
 external_input_dim = input_dim
 #external_output_dim = 20
-external_output_dim = args.param1
+external_output_dim = n_nodes
 
 if L == 2:
     internal_input_dims = [dim+10]
@@ -162,7 +163,8 @@ if not restart_bool:
         b_fac=b_fac,
         perceptron_hidden_dims=perceptron_hidden_dims,
         perceptron_output_dim=perceptron_output_dim,
-        rand_bool=False  
+        rand_bool=False,
+        relu=relu_bool
     )
     error_list = [] # track errors during training
     accuracy_list = [] # track errors during training
@@ -184,6 +186,11 @@ accuracy_stride = 20
 # eta_perceptron = 1  # Typically want smaller learning rate for neural networks
 eta_markov = 2e-3
 eta_perceptron = 2e-3  # Typically want smaller learning rate for neural networks
+adam_beta1 = 0.9
+adam_beta2 = 0.999
+adam_epsilon = 1e-8
+
+# Adam optimizer hyperparameters
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 adam_epsilon = 1e-8

@@ -11,7 +11,7 @@ import numpy as np
 # should i think about tupules to couple training memories with their respective label? 
 
 class GHN:
-    def __init__(self, M_len, L_len, K, n_deg, Temp, m_deg, dt, momentum, rand_mean=-0.003, rand_std=0.00001, Mems=None, Labels=None):
+    def __init__(self, M_len, L_len, K, n_deg, Temp, m_deg, dt, momentum, rand_mean=-0.003, rand_std=0.00001, load_data=False, Mems=None, Labels=None):
         
         self.K = K #total number of patterns
         self.N_M = M_len #length of every row that contains the i-th pattern [visible variable] 
@@ -24,15 +24,18 @@ class GHN:
         self.rand_mean = rand_mean #normal mean for initializing the memory and label values at t = 0 
         self.rand_std = rand_std #normal standard dev for initializing the memory and label values at t = 0 
         
-        if Mems == None:
+        if not load_data:
             self.Ms = np.random.normal(self.rand_mean,self.rand_std, (self.K , self.N_M))
         else:
             self.Ms = Mems
             
-        if Labels == None: 
+        if not load_data: 
             self.Ls = np.random.normal(self.rand_mean,self.rand_std, (self.K , self.N_L))
         else:
             self.Ls = Labels 
+
+        # self.Ms = Mems
+        # self.Ls = Labels 
             
         self.dMs = np.zeros( ( self.K, self.N_M ) )
         self.dLs = np.zeros( ( self.K, self.N_L ) )
