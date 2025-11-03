@@ -236,7 +236,7 @@ class MatrixTreeMarkovICL(nn.Module):
         
         # Initialize parameters with proper scaling
         init_scale_K = 0.05 / np.sqrt(n_nodes)
-        init_scale_B = 0.1 / np.sqrt(K_classes)
+        init_scale_B = 0.1 / np.sqrt(N)  # Scale for N context positions
         init_base = -2.0 - 0.5 * np.log(n_nodes)
         
         # Learnable parameters for rate matrix (modulated by z)
@@ -245,12 +245,12 @@ class MatrixTreeMarkovICL(nn.Module):
         # Optional: modulate rates by context labels
         self.label_modulation = nn.Parameter(torch.randn(n_nodes, n_nodes, l_full_dim) * init_scale_K * 0.5)
         
-        # Output layer: each node contributes to K class logits
-        self.B = nn.Parameter(torch.randn(n_nodes, K_classes) * init_scale_B)
+        # NEW: B maps steady state to context position scores (attention mechanism)
+        self.B = nn.Parameter(torch.randn(n_nodes, N) * init_scale_B)
         
         self.base_log_rates = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base)
         
-        print(f"  Initialized Matrix Tree method (CLASSIFICATION, K={K_classes} classes)")
+        print(f"  Initialized ICL Attention model (K={K_classes} classes, attention over {N} context items)")
         print(f"  Parameters: {sum(p.numel() for p in self.parameters()):,}")
     
     def compute_rate_matrix_K(self, z_batch, labels_batch=None):
@@ -431,7 +431,13 @@ class MatrixTreeMarkovICL(nn.Module):
     
     def forward(self, z_seq_batch, labels_seq_batch, method='direct_solve', temperature=1.0):
         """
-        Forward pass - produces K class logits.
+        Forward pass with attention over context items.
+        
+        Architecture:
+        1. Steady state π from Markov chain
+        2. Context position scores: q_m = Σ_k B_{k,m} * π_k
+        3. Attention: softmax(q / temperature)
+        4. Class logits: sum attention weights by context label
         
         Args:
             z_seq_batch: (batch_size, N+1, z_dim)
@@ -439,9 +445,10 @@ class MatrixTreeMarkovICL(nn.Module):
             method: str - method for computing steady state
             temperature: float - softmax temperature (default 1.0)
         Returns:
-            logits: (batch_size, K_classes) - class logits (before softmax)
+            logits: (batch_size, K_classes) - class logits (log-probabilities)
         """
         batch_size = z_seq_batch.shape[0]
+        device = z_seq_batch.device
         
         # Flatten z sequences
         z_flat = z_seq_batch.reshape(batch_size, -1)
@@ -459,12 +466,25 @@ class MatrixTreeMarkovICL(nn.Module):
         else:
             raise ValueError(f"Invalid method: {method}")
         
-        # Compute logits: logits[k] = Σᵢ p[i] * B[i, k]
-        logits = torch.matmul(p_batch, self.B)  # (batch_size, K_classes)
+        # Compute context position scores: q_m = Σ_k B_{k,m} * π_k
+        q = torch.matmul(p_batch, self.B)  # (batch_size, N)
         
-        # Apply temperature scaling
-        if temperature != 1.0:
-            logits = logits / temperature
+        # Apply temperature and softmax to get attention over context positions
+        attention = torch.softmax(q / temperature, dim=1)  # (batch_size, N)
+        
+        # Convert context labels to class logits
+        # For each class k, sum attention weights where label = k
+        logits = torch.zeros(batch_size, self.K_classes, device=device)
+        
+        for k in range(1, self.K_classes + 1):
+            # Mask: which context positions have label k?
+            mask = (labels_seq_batch == k).float()  # (batch_size, N)
+            # Sum attention weights for those positions
+            logits[:, k-1] = (attention * mask).sum(dim=1)
+        
+        # Convert to log-probabilities for numerical stability
+        # (CrossEntropyLoss expects log-probabilities or logits)
+        logits = torch.log(logits + 1e-10)
         
         return logits
 
