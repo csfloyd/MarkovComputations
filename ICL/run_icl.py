@@ -115,13 +115,16 @@ print("\nCreating model...")
 model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
                            K_classes=params['K_classes'], N=params['N'])
 
-# Train
+# Train with ICL/IWL tracking
 start_time = time.time()
 print("\nTraining...")
 print("="*70)
 history = train_model(model, train_loader, val_loader, device, 
                      n_epochs=params['epochs'], lr=params['lr'], 
-                     method=params['method'], temperature=params['temperature'])
+                     method=params['method'], temperature=params['temperature'],
+                     gmm=gmm, N=params['N'], B=params['B'], 
+                     K_classes=params['K_classes'], exact_copy=params['exact_copy'],
+                     eval_frequency=10, n_eval_samples=500)
 end_time = time.time()
 print(f"Training time: {end_time - start_time:.2f} seconds")
 
