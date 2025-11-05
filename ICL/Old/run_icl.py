@@ -7,16 +7,19 @@ import torch
 import numpy as np
 import pickle
 import argparse
+# NEW (classification version)
+from markov_icl_gmm_discrete_linear import (
+    GaussianMixtureModel, 
+    generate_icl_gmm_data, 
+    ICLGMMDataset,
+    collate_fn,
+    MatrixTreeMarkovICL,
+    train_model,
+    test_icl
+)
 from torch.utils.data import DataLoader
 import os
 import time
-
-# Import from refactored modular structure
-from data_generation import GaussianMixtureModel, generate_icl_gmm_data
-from datasets import ICLGMMDataset, collate_fn
-from models import MatrixTreeMarkovICL
-from training import train_model
-from evaluation import test_icl
 
 
 # Create argument parser
