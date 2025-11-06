@@ -19,7 +19,7 @@ class GaussianMixtureModel:
         Args:
             K: Number of classes
             D: Dimension of feature space
-            L: Number of labels (defaults to K)
+            L: Number of labels (defaults to K). Each class gets a random label from 1 to L.
             epsilon: Within-class noise scale
             seed: Random seed for reproducibility
             label_min: Minimum label value (unused for discrete labels)
@@ -39,8 +39,9 @@ class GaussianMixtureModel:
         # Sample class means from standard Gaussian scaled by 1/sqrt(D)
         self.class_means = torch.randn(K, D) / np.sqrt(D)
         
-        # DISCRETE labels from 1 to K
-        self.class_to_label = torch.arange(1, K + 1, dtype=torch.float32)
+        # Randomly assign each of K classes a label from {1, 2, ..., L}
+        # This allows L < K (multiple classes can share the same label)
+        self.class_to_label = torch.randint(1, self.L + 1, (K,), dtype=torch.float32)
         
     def sample_from_class(self, class_idx, n_samples=1):
         """
@@ -70,8 +71,7 @@ class GaussianMixtureModel:
         return self.class_to_label[class_idx]
 
 
-def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=True, B=1, 
-                          label_min=None, label_max=None, K_classes=None):
+def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=True, B=1, L=None):
     """
     Generate ICL data from GMM with DISCRETE labels.
     
@@ -87,7 +87,7 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
         B: Burstiness - number of repetitions per class in context
         label_min: Unused (kept for backwards compatibility)
         label_max: Unused (kept for backwards compatibility)
-        K_classes: Number of possible label classes (defaults to gmm.K)
+        L: Number of possible label classes (defaults to gmm.L)
         
     Returns:
         List of tuples (z_seq, labels, target_label) where:
@@ -97,166 +97,207 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
     """
     assert 1 <= B <= N and N % B == 0, f"Invalid B={B} for N={N}"
     n_classes_in_context = N // B
-    K_labels = K_classes if K_classes is not None else gmm.K
+    K_labels = L if L is not None else gmm.L
     data = []
     
     for _ in range(n_samples):
+
+        # ------------------------------------------------------------
+        # Case 1: Use *novel* (unseen) classes
+        # ------------------------------------------------------------
         if novel_classes:
-            # Create completely new classes (not in training GMM)
-            if B == 1:
-                # Each context item is from a different novel class
-                novel_means = torch.randn(N, gmm.D) / np.sqrt(gmm.D)
-                novel_labels = torch.randint(1, K_labels + 1, (N,), dtype=torch.float32)
-                z_context = []
-                labels = []
-                for i in range(N):
+            novel_means = torch.randn(n_classes_in_context, gmm.D) / np.sqrt(gmm.D)
+            novel_labels = torch.randint(1, K_labels + 1, (n_classes_in_context,), dtype=torch.float32)
+
+            z_context = []
+            labels = []
+
+            # Build context (each class repeated B times)
+            for class_idx in range(n_classes_in_context):
+                base_mean = novel_means[class_idx]
+                class_label = novel_labels[class_idx]
+                for _ in range(B):
                     noise = torch.randn(gmm.D) / np.sqrt(gmm.D)
-                    z_context.append(novel_means[i] + gmm.epsilon * noise)
-                    labels.append(novel_labels[i])
-                copy_idx = torch.randint(0, N, (1,)).item()
-                if exact_copy:
-                    z_query = z_context[copy_idx].clone()
-                else:
-                    z_query = novel_means[copy_idx] + gmm.epsilon * torch.randn(gmm.D) / np.sqrt(gmm.D)
-                target_label = novel_labels[copy_idx]
+                    z_context.append(base_mean + gmm.epsilon * noise)
+                    labels.append(class_label)
+
+            # Choose which class the query belongs to (must be in context)
+            query_class_idx = torch.randint(0, n_classes_in_context, (1,)).item()
+
+            if exact_copy:
+                # Choose one of the B repeated context items
+                copy_offset = torch.randint(0, B, (1,)).item()
+                z_query = z_context[query_class_idx * B + copy_offset].clone()
             else:
-                # N/B novel classes, each repeated B times
-                novel_means = torch.randn(n_classes_in_context, gmm.D) / np.sqrt(gmm.D)
-                novel_labels = torch.randint(1, K_labels + 1, (n_classes_in_context,), dtype=torch.float32)
-                z_context = []
-                labels = []
-                for class_idx in range(n_classes_in_context):
-                    for _ in range(B):
-                        noise = torch.randn(gmm.D) / np.sqrt(gmm.D)
-                        z_context.append(novel_means[class_idx] + gmm.epsilon * noise)
-                        labels.append(novel_labels[class_idx])
-                query_class_idx = torch.randint(0, n_classes_in_context, (1,)).item()
-                if exact_copy:
-                    copy_offset = torch.randint(0, B, (1,)).item()
-                    z_query = z_context[query_class_idx * B + copy_offset].clone()
-                else:
-                    z_query = novel_means[query_class_idx] + gmm.epsilon * torch.randn(gmm.D) / np.sqrt(gmm.D)
-                target_label = novel_labels[query_class_idx]
+                z_query = novel_means[query_class_idx] + gmm.epsilon * torch.randn(gmm.D) / np.sqrt(gmm.D)
+
+            target_label = novel_labels[query_class_idx]
+
+        # ------------------------------------------------------------
+        # Case 2: Use existing GMM classes
+        # ------------------------------------------------------------
         else:
-            # Use existing GMM classes
-            if B == 1:
-                # Each context item can be from any GMM class
-                class_indices = torch.randint(0, gmm.K, (N,))
-                z_context = []
-                labels = []
-                for i in range(N):
-                    z_context.append(gmm.sample_from_class(class_indices[i].item()).squeeze(0))
-                    labels.append(gmm.get_label(class_indices[i].item()))
-                copy_idx = torch.randint(0, N, (1,)).item()
-                query_class = class_indices[copy_idx].item()
-                if exact_copy:
-                    z_query = z_context[copy_idx].clone()
-                else:
-                    z_query = gmm.sample_from_class(query_class).squeeze(0)
-                target_label = gmm.get_label(query_class)
+            # Choose classes that appear in the context
+            context_classes = torch.randint(0, gmm.K, (n_classes_in_context,))
+
+            z_context = []
+            labels = []
+
+            for class_idx in context_classes:
+                class_idx = class_idx.item()
+                class_label = gmm.get_label(class_idx)
+                for _ in range(B):
+                    z_context.append(gmm.sample_from_class(class_idx).squeeze(0))
+                    labels.append(class_label)
+
+            # Choose query class from among context classes
+            query_class_pos = torch.randint(0, n_classes_in_context, (1,)).item()
+            query_class = context_classes[query_class_pos].item()
+
+            if exact_copy:
+                copy_offset = torch.randint(0, B, (1,)).item()
+                z_query = z_context[query_class_pos * B + copy_offset].clone()
             else:
-                # N/B GMM classes, each repeated B times
-                context_classes = torch.randint(0, gmm.K, (n_classes_in_context,))
-                z_context = []
-                labels = []
-                for class_idx in context_classes:
-                    class_label = gmm.get_label(class_idx.item())
-                    for _ in range(B):
-                        z_context.append(gmm.sample_from_class(class_idx.item()).squeeze(0))
-                        labels.append(class_label)
-                query_class_position = torch.randint(0, n_classes_in_context, (1,)).item()
-                query_class = context_classes[query_class_position].item()
-                if exact_copy:
-                    copy_offset = torch.randint(0, B, (1,)).item()
-                    z_query = z_context[query_class_position * B + copy_offset].clone()
-                else:
-                    z_query = gmm.sample_from_class(query_class).squeeze(0)
-                target_label = gmm.get_label(query_class)
-        
+                z_query = gmm.sample_from_class(query_class).squeeze(0)
+
+            target_label = gmm.get_label(query_class)
+
+        # ------------------------------------------------------------
         z_seq = torch.stack(z_context + [z_query])
         data.append((z_seq, torch.tensor(labels), target_label))
-    
+
     return data
 
-
-def generate_icl_gmm_data_with_label_swap(gmm, n_samples, N, exact_copy=True, B=1, K_classes=None):
+def generate_iwl_gmm_data(gmm, n_samples, N, B=1):
     """
-    Generate ICL data with SWAPPED labels for testing ICL (secondary metric).
+    Generate ICL data from GMM with DISCRETE labels.
     
-    Uses existing GMM classes but with randomly permuted labels. This tests whether
-    the model can learn new label mappings from context rather than relying on
-    learned weights.
+    Creates sequences of N context examples plus 1 query, where the query's class
+    appears in the context (optionally repeated B times for "burstiness").
     
     Args:
         gmm: GaussianMixtureModel instance
         n_samples: Number of sequences to generate
         N: Number of context examples
-        exact_copy: Whether query is exact copy of context item
-        B: Burstiness (repetitions per class)
-        K_classes: Number of label classes
+        B: Burstiness - number of repetitions per class in context
+        label_min: Unused (kept for backwards compatibility)
+        label_max: Unused (kept for backwards compatibility)
+        L: Number of possible label classes (defaults to gmm.L)
         
     Returns:
-        List of (z_seq, labels, target_label) tuples with swapped labels
+        List of tuples (z_seq, labels, target_label) where:
+            - z_seq: (N+1, D) tensor of features
+            - labels: (N,) tensor of context labels
+            - target_label: scalar target label for query
     """
-    assert 1 <= B <= N and N % B == 0
+    assert 1 <= B <= N and N % B == 0, f"Invalid B={B} for N={N}"
     n_classes_in_context = N // B
-    K_labels = K_classes if K_classes is not None else gmm.K
     data = []
     
     for _ in range(n_samples):
-        # Create a random label permutation (swap)
-        label_permutation = torch.randperm(K_labels) + 1  # Permuted labels from 1 to K
-        
-        if B == 1:
-            # Sample N classes from GMM
-            class_indices = torch.randint(0, gmm.K, (N,))
-            z_context = []
-            labels = []
-            for i in range(N):
-                z_context.append(gmm.sample_from_class(class_indices[i].item()).squeeze(0))
-                # Use swapped label instead of original
-                original_label = int(gmm.get_label(class_indices[i].item()))
-                swapped_label = label_permutation[original_label - 1].item()
-                labels.append(float(swapped_label))
-            
-            copy_idx = torch.randint(0, N, (1,)).item()
-            query_class = class_indices[copy_idx].item()
-            if exact_copy:
-                z_query = z_context[copy_idx].clone()
-            else:
-                z_query = gmm.sample_from_class(query_class).squeeze(0)
-            
-            # Target label is the swapped label
-            original_target = int(gmm.get_label(query_class))
-            target_label = float(label_permutation[original_target - 1].item())
-        else:
-            # Sample N/B classes from GMM
-            context_classes = torch.randint(0, gmm.K, (n_classes_in_context,))
-            z_context = []
-            labels = []
-            for class_idx in context_classes:
-                # Get swapped label
-                original_label = int(gmm.get_label(class_idx.item()))
-                swapped_label = float(label_permutation[original_label - 1].item())
-                
-                for _ in range(B):
-                    z_context.append(gmm.sample_from_class(class_idx.item()).squeeze(0))
-                    labels.append(swapped_label)
-            
-            query_class_position = torch.randint(0, n_classes_in_context, (1,)).item()
-            query_class = context_classes[query_class_position].item()
-            if exact_copy:
-                copy_offset = torch.randint(0, B, (1,)).item()
-                z_query = z_context[query_class_position * B + copy_offset].clone()
-            else:
-                z_query = gmm.sample_from_class(query_class).squeeze(0)
-            
-            # Target label is the swapped label
-            original_target = int(gmm.get_label(query_class))
-            target_label = float(label_permutation[original_target - 1].item())
-        
+        # Step 1: choose the classes that appear in context
+        context_classes = torch.randint(0, gmm.K, (n_classes_in_context,))
+
+        # Step 2: expand each class B times to form context labels
+        z_context = []
+        labels = []
+        for class_idx in context_classes:
+            class_idx = class_idx.item()
+            class_label = gmm.get_label(class_idx)
+            for _ in range(B):
+                z_context.append(gmm.sample_from_class(class_idx).squeeze(0))
+                labels.append(class_label)
+
+        # Step 3: Choose a random class for the query
+        query_class = torch.randint(0, gmm.K, (1,)).item()
+        z_query = gmm.sample_from_class(query_class).squeeze(0)
+        target_label = gmm.get_label(query_class)
+
+        # Stack and store
         z_seq = torch.stack(z_context + [z_query])
         data.append((z_seq, torch.tensor(labels), target_label))
     
     return data
+
+
+# def generate_icl_gmm_data_with_label_swap(gmm, n_samples, N, exact_copy=True, B=1, L=None):
+#     """
+#     Generate ICL data with SWAPPED labels for testing ICL (secondary metric).
+    
+#     Uses existing GMM classes but with randomly permuted labels. This tests whether
+#     the model can learn new label mappings from context rather than relying on
+#     learned weights.
+    
+#     Args:
+#         gmm: GaussianMixtureModel instance
+#         n_samples: Number of sequences to generate
+#         N: Number of context examples
+#         exact_copy: Whether query is exact copy of context item
+#         B: Burstiness (repetitions per class)
+#         L: Number of label classes
+        
+#     Returns:
+#         List of (z_seq, labels, target_label) tuples with swapped labels
+#     """
+#     assert 1 <= B <= N and N % B == 0
+#     n_classes_in_context = N // B
+#     K_labels = L if L is not None else gmm.L
+#     data = []
+    
+#     for _ in range(n_samples):
+#         # Create a random label permutation (swap)
+#         label_permutation = torch.randperm(K_labels) + 1  # Permuted labels from 1 to K
+        
+#         if B == 1:
+#             # Sample N classes from GMM
+#             class_indices = torch.randint(0, gmm.K, (N,))
+#             z_context = []
+#             labels = []
+#             for i in range(N):
+#                 z_context.append(gmm.sample_from_class(class_indices[i].item()).squeeze(0))
+#                 # Use swapped label instead of original
+#                 original_label = int(gmm.get_label(class_indices[i].item()))
+#                 swapped_label = label_permutation[original_label - 1].item()
+#                 labels.append(float(swapped_label))
+            
+#             copy_idx = torch.randint(0, N, (1,)).item()
+#             query_class = class_indices[copy_idx].item()
+#             if exact_copy:
+#                 z_query = z_context[copy_idx].clone()
+#             else:
+#                 z_query = gmm.sample_from_class(query_class).squeeze(0)
+            
+#             # Target label is the swapped label
+#             original_target = int(gmm.get_label(query_class))
+#             target_label = float(label_permutation[original_target - 1].item())
+#         else:
+#             # Sample N/B classes from GMM
+#             context_classes = torch.randint(0, gmm.K, (n_classes_in_context,))
+#             z_context = []
+#             labels = []
+#             for class_idx in context_classes:
+#                 # Get swapped label
+#                 original_label = int(gmm.get_label(class_idx.item()))
+#                 swapped_label = float(label_permutation[original_label - 1].item())
+                
+#                 for _ in range(B):
+#                     z_context.append(gmm.sample_from_class(class_idx.item()).squeeze(0))
+#                     labels.append(swapped_label)
+            
+#             query_class_position = torch.randint(0, n_classes_in_context, (1,)).item()
+#             query_class = context_classes[query_class_position].item()
+#             if exact_copy:
+#                 copy_offset = torch.randint(0, B, (1,)).item()
+#                 z_query = z_context[query_class_position * B + copy_offset].clone()
+#             else:
+#                 z_query = gmm.sample_from_class(query_class).squeeze(0)
+            
+#             # Target label is the swapped label
+#             original_target = int(gmm.get_label(query_class))
+#             target_label = float(label_permutation[original_target - 1].item())
+        
+#         z_seq = torch.stack(z_context + [z_query])
+#         data.append((z_seq, torch.tensor(labels), target_label))
+    
+#     return data
 

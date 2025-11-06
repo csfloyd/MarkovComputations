@@ -16,19 +16,19 @@ class BaseICLModel(nn.Module, ABC):
     All ICL models should inherit from this class and implement the forward method.
     """
     
-    def __init__(self, n_nodes=None, z_dim=2, K_classes=75, N=4):
+    def __init__(self, n_nodes=None, z_dim=2, L=75, N=4):
         """
         Initialize base ICL model.
         
         Args:
             n_nodes: Number of computational nodes (model-specific, can be None)
             z_dim: Dimension of input features
-            K_classes: Number of output classes
+            L: Number of output classes
             N: Number of context examples
         """
         super().__init__()
         self.z_dim = z_dim
-        self.K_classes = K_classes
+        self.L = L
         self.N = N
         
     @abstractmethod
@@ -38,12 +38,12 @@ class BaseICLModel(nn.Module, ABC):
         
         Args:
             z_seq_batch: (batch_size, N+1, z_dim) - input feature sequences
-            labels_seq_batch: (batch_size, N) - context labels (1 to K_classes)
+            labels_seq_batch: (batch_size, N) - context labels (1 to L)
             method: Optional method specifier (model-dependent)
             temperature: Softmax temperature for classification
             
         Returns:
-            logits: (batch_size, K_classes) - log-probabilities for each class
+            logits: (batch_size, L) - log-probabilities for each class
         """
         pass
     
@@ -58,7 +58,7 @@ class BaseICLModel(nn.Module, ABC):
             temperature: Softmax temperature
             
         Returns:
-            predictions: (batch_size,) - predicted class indices (0 to K_classes-1)
+            predictions: (batch_size,) - predicted class indices (0 to L-1)
         """
         logits = self.forward(z_seq_batch, labels_seq_batch, method, temperature)
         return logits.argmax(dim=1)

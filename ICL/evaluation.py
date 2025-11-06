@@ -5,11 +5,11 @@ Provides testing and metrics for In-Context Learning (ICL) and In-Weight Learnin
 """
 
 import torch
-from data_generation import generate_icl_gmm_data, generate_icl_gmm_data_with_label_swap
+from data_generation import generate_icl_gmm_data, generate_iwl_gmm_data#, generate_icl_gmm_data_with_label_swap
 
 
 def test_icl(model, gmm, N, device, n_samples=1000, exact_copy=True, B=1, 
-             test_label_shifts=False, method='direct_solve', K_classes=None, temperature=1.0):
+             test_label_shifts=False, method='direct_solve', L=None, temperature=1.0):
     """
     Test in-context learning on novel classes with CLASSIFICATION.
     
@@ -23,14 +23,14 @@ def test_icl(model, gmm, N, device, n_samples=1000, exact_copy=True, B=1,
         B: Burstiness parameter
         test_label_shifts: Unused (kept for backwards compatibility)
         method: Method for computing steady state (model-specific)
-        K_classes: Number of output classes
+        L: Number of output classes
         temperature: Softmax temperature
         
     Returns:
         Dict with 'in_dist' and 'novel_classes' accuracy scores
     """
     model.eval()
-    K_labels = K_classes if K_classes is not None else gmm.K
+    K_labels = L if L is not None else gmm.L
     
     print("\n" + "="*70)
     print("TESTING IN-CONTEXT LEARNING (CLASSIFICATION)")
@@ -40,7 +40,7 @@ def test_icl(model, gmm, N, device, n_samples=1000, exact_copy=True, B=1,
     print(f"\n1. In-Distribution Test (classes 1 to {K_labels}):")
     test_data_id = generate_icl_gmm_data(
         gmm, n_samples, N, novel_classes=False, 
-        exact_copy=exact_copy, B=B, K_classes=K_labels
+        exact_copy=exact_copy, B=B, L=K_labels
     )
     correct_id = 0
     total_id = 0
@@ -66,7 +66,7 @@ def test_icl(model, gmm, N, device, n_samples=1000, exact_copy=True, B=1,
     print(f"\n2. Out-of-Distribution Test (novel means, classes 1 to {K_labels}) - TRUE ICL:")
     test_data_ood = generate_icl_gmm_data(
         gmm, n_samples, N, novel_classes=True,
-        exact_copy=exact_copy, B=B, K_classes=K_labels
+        exact_copy=exact_copy, B=B, L=K_labels
     )
     correct_ood = 0
     total_ood = 0
@@ -105,7 +105,7 @@ def test_icl(model, gmm, N, device, n_samples=1000, exact_copy=True, B=1,
     return {'in_dist': acc_id, 'novel_classes': acc_ood}
 
 
-def evaluate_iwl(model, gmm, N, device, n_eval_samples=500, K_classes=None, 
+def evaluate_iwl(model, gmm, N, device, n_eval_samples=500, L=None, 
                  method='direct_solve', temperature=1.0):
     """
     Evaluate In-Weight Learning (IWL) accuracy.
@@ -119,7 +119,7 @@ def evaluate_iwl(model, gmm, N, device, n_eval_samples=500, K_classes=None,
         N: Number of context examples
         device: torch device
         n_eval_samples: Number of evaluation samples
-        K_classes: Number of output classes
+        L: Number of output classes
         method: Method for computing steady state
         temperature: Softmax temperature
         
@@ -128,10 +128,8 @@ def evaluate_iwl(model, gmm, N, device, n_eval_samples=500, K_classes=None,
     """
     model.eval()
     
-    iwl_data = generate_icl_gmm_data(
-        gmm, n_eval_samples, N, 
-        novel_classes=False, exact_copy=False, B=1, K_classes=K_classes
-    )
+    iwl_data = generate_iwl_gmm_data(
+        gmm, n_eval_samples, N, B=1)
     
     iwl_correct = 0
     with torch.no_grad():
@@ -153,7 +151,7 @@ def evaluate_iwl(model, gmm, N, device, n_eval_samples=500, K_classes=None,
 
 
 def evaluate_icl_novel(model, gmm, N, device, n_eval_samples=500, exact_copy=True, 
-                      B=1, K_classes=None, method='direct_solve', temperature=1.0):
+                      B=1, L=None, method='direct_solve', temperature=1.0):
     """
     Evaluate ICL Primary metric: Novel classes with B copies in context.
     
@@ -167,7 +165,7 @@ def evaluate_icl_novel(model, gmm, N, device, n_eval_samples=500, exact_copy=Tru
         n_eval_samples: Number of evaluation samples
         exact_copy: Whether query is exact copy of context item
         B: Burstiness parameter
-        K_classes: Number of output classes
+        L: Number of output classes
         method: Method for computing steady state
         temperature: Softmax temperature
         
@@ -178,7 +176,7 @@ def evaluate_icl_novel(model, gmm, N, device, n_eval_samples=500, exact_copy=Tru
     
     icl_novel_data = generate_icl_gmm_data(
         gmm, n_eval_samples, N,
-        novel_classes=True, exact_copy=exact_copy, B=B, K_classes=K_classes
+        novel_classes=True, exact_copy=exact_copy, B=B, L=L
     )
     
     icl_novel_correct = 0
@@ -200,51 +198,51 @@ def evaluate_icl_novel(model, gmm, N, device, n_eval_samples=500, exact_copy=Tru
     return icl_novel_acc
 
 
-def evaluate_icl_swap(model, gmm, N, device, n_eval_samples=500, exact_copy=True,
-                      B=1, K_classes=None, method='direct_solve', temperature=1.0):
-    """
-    Evaluate ICL Secondary metric: Label swapping.
+# def evaluate_icl_swap(model, gmm, N, device, n_eval_samples=500, exact_copy=True,
+#                       B=1, L=None, method='direct_solve', temperature=1.0):
+#     """
+#     Evaluate ICL Secondary metric: Label swapping.
     
-    Tests if model can learn new label mappings from context by using
-    existing GMM classes with randomly permuted labels.
+#     Tests if model can learn new label mappings from context by using
+#     existing GMM classes with randomly permuted labels.
     
-    Args:
-        model: ICL model to evaluate
-        gmm: GaussianMixtureModel instance
-        N: Number of context examples
-        device: torch device
-        n_eval_samples: Number of evaluation samples
-        exact_copy: Whether query is exact copy of context item
-        B: Burstiness parameter
-        K_classes: Number of output classes
-        method: Method for computing steady state
-        temperature: Softmax temperature
+#     Args:
+#         model: ICL model to evaluate
+#         gmm: GaussianMixtureModel instance
+#         N: Number of context examples
+#         device: torch device
+#         n_eval_samples: Number of evaluation samples
+#         exact_copy: Whether query is exact copy of context item
+#         B: Burstiness parameter
+#         L: Number of output classes
+#         method: Method for computing steady state
+#         temperature: Softmax temperature
         
-    Returns:
-        float: ICL swap accuracy (0-100)
-    """
-    model.eval()
+#     Returns:
+#         float: ICL swap accuracy (0-100)
+#     """
+#     model.eval()
     
-    icl_swap_data = generate_icl_gmm_data_with_label_swap(
-        gmm, n_eval_samples, N,
-        exact_copy=exact_copy, B=B, K_classes=K_classes
-    )
+#     icl_swap_data = generate_icl_gmm_data_with_label_swap(
+#         gmm, n_eval_samples, N,
+#         exact_copy=exact_copy, B=B, L=L
+#     )
     
-    icl_swap_correct = 0
-    with torch.no_grad():
-        for z_seq, labels, target in icl_swap_data:
-            logits = model(
-                z_seq.unsqueeze(0).to(device),
-                labels.unsqueeze(0).to(device),
-                method=method,
-                temperature=temperature
-            )
-            pred_class = logits.argmax(dim=1).item() + 1
-            # target is already a scalar float, not a tensor
-            target_class = int(target) if isinstance(target, (int, float)) else int(target.item())
-            if pred_class == target_class:
-                icl_swap_correct += 1
+#     icl_swap_correct = 0
+#     with torch.no_grad():
+#         for z_seq, labels, target in icl_swap_data:
+#             logits = model(
+#                 z_seq.unsqueeze(0).to(device),
+#                 labels.unsqueeze(0).to(device),
+#                 method=method,
+#                 temperature=temperature
+#             )
+#             pred_class = logits.argmax(dim=1).item() + 1
+#             # target is already a scalar float, not a tensor
+#             target_class = int(target) if isinstance(target, (int, float)) else int(target.item())
+#             if pred_class == target_class:
+#                 icl_swap_correct += 1
     
-    icl_swap_acc = 100.0 * icl_swap_correct / n_eval_samples
-    return icl_swap_acc
+#     icl_swap_acc = 100.0 * icl_swap_correct / n_eval_samples
+#     return icl_swap_acc
 

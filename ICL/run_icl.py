@@ -35,18 +35,18 @@ output_dir = args.output
 
 #### discrete test
 # Pre-define all parameters
-K_classes = 75
-K = K_classes
-D = 5
-N = 10
+L = 32
+K = args.param1
+D = 16
+N = 8
 B = 2
-#n_nodes = 5
-n_nodes = args.param1
+n_nodes = 20
+#n_nodes = args.param1
 epochs = 1000
 lr = 0.001
 batch_size = 64
-train_samples = 10000
-val_samples = 2000
+train_samples = 50000
+val_samples = 10000
 epsilon = 0.1
 seed = 42
 exact_copy = True
@@ -56,7 +56,7 @@ temperature = 1.0
 # Set parameters
 params = {
     'K': K,                      # Number of GMM classes
-    'K_classes': K_classes,      # Number of output classes (can be different from K)
+    'L': L,                      # Number of output classes (can be different from K)
     'D': D,                      # Dimension
     'N': N,                      # Context examples
     'B': B,                      # Burstiness
@@ -88,19 +88,20 @@ np.random.seed(params['seed'])
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Device: {device}\n")
 
-# Create GMM with discrete labels (1 to K)
+# Create GMM with discrete labels (1 to L)
 print("Creating GMM with discrete labels...")
-gmm = GaussianMixtureModel(K=params['K'], D=params['D'], epsilon=params['epsilon'], seed=params['seed'])
-print(f"  Class labels: {gmm.class_to_label[:min(10, params['K'])].numpy()}... (1 to {params['K']})")
+gmm = GaussianMixtureModel(K=params['K'], D=params['D'], L=params['L'], epsilon=params['epsilon'], seed=params['seed'])
+print(f"  GMM: {params['K']} classes with labels randomly assigned from {{1, ..., {params['L']}}}")
+print(f"  First 10 class labels: {gmm.class_to_label[:min(10, params['K'])].numpy()}")
 
 # Generate data
 print("\nGenerating data...")
 train_data = generate_icl_gmm_data(gmm, params['train_samples'], params['N'], 
                                    novel_classes=False, exact_copy=params['exact_copy'], 
-                                   B=params['B'], K_classes=params['K_classes'])
+                                   B=params['B'], L=params['L'])
 val_data = generate_icl_gmm_data(gmm, params['val_samples'], params['N'], 
                                  novel_classes=False, exact_copy=params['exact_copy'], 
-                                 B=params['B'], K_classes=params['K_classes'])
+                                 B=params['B'], L=params['L'])
 
 train_loader = DataLoader(ICLGMMDataset(train_data), batch_size=params['batch_size'],
                           shuffle=True, collate_fn=collate_fn)
@@ -110,7 +111,7 @@ val_loader = DataLoader(ICLGMMDataset(val_data), batch_size=params['batch_size']
 # Create model
 print("\nCreating model...")
 model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
-                           K_classes=params['K_classes'], N=params['N'])
+                           L=params['L'], N=params['N'])
 
 # Train with ICL/IWL tracking
 start_time = time.time()
@@ -120,15 +121,15 @@ history = train_model(model, train_loader, val_loader, device,
                      n_epochs=params['epochs'], lr=params['lr'], 
                      method=params['method'], temperature=params['temperature'],
                      gmm=gmm, N=params['N'], B=params['B'], 
-                     K_classes=params['K_classes'], exact_copy=params['exact_copy'],
-                     eval_frequency=10, n_eval_samples=500)
+                     L=params['L'], exact_copy=params['exact_copy'],
+                     eval_frequency=1, n_eval_samples=500)
 end_time = time.time()
 print(f"Training time: {end_time - start_time:.2f} seconds")
 
 # Test
 results = test_icl(model, gmm, params['N'], device, n_samples=1000, 
                   exact_copy=params['exact_copy'], B=params['B'], 
-                  method=params['method'], K_classes=params['K_classes'],
+                  method=params['method'], L=params['L'],
                   temperature=params['temperature'])
 
 # Save results

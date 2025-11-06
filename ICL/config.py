@@ -14,7 +14,7 @@ class ExperimentConfig:
     
     # Data parameters
     K: int = 75                    # Number of GMM classes for training
-    K_classes: Optional[int] = None  # Number of output label classes (defaults to K)
+    L: Optional[int] = None        # Number of output label classes (defaults to K)
     D: int = 5                     # Dimension of feature space
     N: int = 10                    # Number of context examples
     B: int = 2                     # Burstiness (repetitions per class)
@@ -44,14 +44,14 @@ class ExperimentConfig:
     
     def __post_init__(self):
         """Validate and set defaults after initialization."""
-        # Set K_classes to K if not specified
-        if self.K_classes is None:
-            self.K_classes = self.K
+        # Set L to K if not specified
+        if self.L is None:
+            self.L = self.K
         
         # Validate parameters
         assert 1 <= self.B <= self.N, f"Invalid B={self.B} for N={self.N}"
         assert self.N % self.B == 0, f"N={self.N} must be divisible by B={self.B}"
-        assert self.K_classes >= 1, f"K_classes must be >= 1"
+        assert self.L >= 1, f"L must be >= 1"
         assert self.epochs > 0, f"epochs must be > 0"
         assert self.lr > 0, f"lr must be > 0"
     
@@ -68,7 +68,7 @@ class ExperimentConfig:
         """Pretty print configuration."""
         lines = ["ExperimentConfig:"]
         lines.append("  Data:")
-        lines.append(f"    K={self.K}, K_classes={self.K_classes}, D={self.D}, N={self.N}, B={self.B}")
+        lines.append(f"    K={self.K}, L={self.L}, D={self.D}, N={self.N}, B={self.B}")
         lines.append(f"    epsilon={self.epsilon}, exact_copy={self.exact_copy}")
         lines.append("  Model:")
         lines.append(f"    type={self.model_type}, n_nodes={self.n_nodes}")

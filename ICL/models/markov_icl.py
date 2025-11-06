@@ -29,18 +29,18 @@ class MatrixTreeMarkovICL(BaseICLModel):
     4. Aggregate attention by label to get class logits
     """
     
-    def __init__(self, n_nodes=10, z_dim=2, K_classes=75, N=4, use_label_mod=False):
+    def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False):
         """
         Initialize Markov ICL model.
         
         Args:
             n_nodes: Number of Markov chain nodes
             z_dim: Dimension of input features
-            K_classes: Number of output classes
+            L: Number of output classes
             N: Number of context examples
             use_label_mod: Whether to modulate rates by context labels
         """
-        super().__init__(n_nodes=n_nodes, z_dim=z_dim, K_classes=K_classes, N=N)
+        super().__init__(n_nodes=n_nodes, z_dim=z_dim, L=L, N=N)
         self.n_nodes = n_nodes
         self.use_label_mod = use_label_mod
         
@@ -69,7 +69,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
         # Base log rates
         self.base_log_rates = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base)
         
-        print(f"  Initialized ICL Attention model (K={K_classes} classes, "
+        print(f"  Initialized ICL Attention model (L={L} classes, "
               f"attention over {N} context items)")
         print(f"  Label modulation: {self.use_label_mod}")
         print(f"  Parameters: {self.get_num_parameters():,}")
@@ -259,13 +259,13 @@ class MatrixTreeMarkovICL(BaseICLModel):
         
         Args:
             z_seq_batch: (batch_size, N+1, z_dim)
-            labels_seq_batch: (batch_size, N) - context labels (1 to K_classes)
+            labels_seq_batch: (batch_size, N) - context labels (1 to L)
             method: str - method for computing steady state
                 'matrix_tree', 'linear_solver', or 'direct_solve'
             temperature: float - softmax temperature (default 1.0)
             
         Returns:
-            logits: (batch_size, K_classes) - class logits (log-probabilities)
+            logits: (batch_size, L) - class logits (log-probabilities)
         """
         batch_size = z_seq_batch.shape[0]
         device = z_seq_batch.device
@@ -293,10 +293,10 @@ class MatrixTreeMarkovICL(BaseICLModel):
         attention = torch.softmax(q / temperature, dim=1)  # (batch_size, N)
         
         # Convert context labels to class logits (VECTORIZED)
-        # One-hot encode labels: (batch, N) → (batch, N, K_classes)
+        # One-hot encode labels: (batch, N) → (batch, N, L)
         labels_one_hot = torch.nn.functional.one_hot(
             labels_seq_batch.long() - 1,  # Convert 1-indexed to 0-indexed
-            num_classes=self.K_classes
+            num_classes=self.L
         ).float()
         
         # Aggregate attention weights by label class

@@ -7,12 +7,12 @@ Provides training loops with ICL/IWL tracking.
 import torch
 import torch.nn as nn
 import numpy as np
-from evaluation import evaluate_iwl, evaluate_icl_novel, evaluate_icl_swap
+from evaluation import evaluate_iwl, evaluate_icl_novel#, evaluate_icl_swap
 
 
 def train_model(model, train_loader, val_loader, device, n_epochs=200, lr=0.001, 
                 method='direct_solve', temperature=1.0, gmm=None, N=None, B=1, 
-                K_classes=None, exact_copy=True, eval_frequency=10, n_eval_samples=500):
+                L=None, exact_copy=True, eval_frequency=10, n_eval_samples=500):
     """
     Train the classification model with ICL/IWL tracking.
     
@@ -28,7 +28,7 @@ def train_model(model, train_loader, val_loader, device, n_epochs=200, lr=0.001,
         gmm: GaussianMixtureModel instance (needed for ICL/IWL evaluation)
         N: Number of context examples
         B: Burstiness parameter
-        K_classes: Number of output classes
+        L: Number of output classes
         exact_copy: Whether query is exact copy of context item
         eval_frequency: How often to evaluate ICL/IWL (in epochs)
         n_eval_samples: Number of samples for each ICL/IWL evaluation
@@ -47,8 +47,8 @@ def train_model(model, train_loader, val_loader, device, n_epochs=200, lr=0.001,
         'val_acc': [],
         # ICL and IWL tracking
         'iwl_acc': [],           # In-Weight Learning
-        'icl_novel_acc': [],     # ICL Primary: Novel classes
-        'icl_swap_acc': []       # ICL Secondary: Label swapping
+        'icl_acc': []     # ICL Primary: Novel classes
+        #'icl_swap_acc': []       # ICL Secondary: Label swapping
     }
     
     for epoch in range(n_epochs):
@@ -109,32 +109,32 @@ def train_model(model, train_loader, val_loader, device, n_epochs=200, lr=0.001,
             
             # 1. IWL: Target class unlikely to appear in context
             iwl_acc = evaluate_iwl(
-                model, gmm, N, device, n_eval_samples, K_classes, method, temperature
+                model, gmm, N, device, n_eval_samples, L, method, temperature
             )
             history['iwl_acc'].append(iwl_acc)
             
             # 2. ICL Primary: Novel classes with B copies in context
             icl_novel_acc = evaluate_icl_novel(
-                model, gmm, N, device, n_eval_samples, exact_copy, B, K_classes, method, temperature
+                model, gmm, N, device, n_eval_samples, exact_copy, B, L, method, temperature
             )
-            history['icl_novel_acc'].append(icl_novel_acc)
+            history['icl_acc'].append(icl_novel_acc)
             
-            # 3. ICL Secondary: Label swapping
-            icl_swap_acc = evaluate_icl_swap(
-                model, gmm, N, device, n_eval_samples, exact_copy, B, K_classes, method, temperature
-            )
-            history['icl_swap_acc'].append(icl_swap_acc)
+            # # 3. ICL Secondary: Label swapping
+            # icl_swap_acc = evaluate_icl_swap(
+            #     model, gmm, N, device, n_eval_samples, exact_copy, B, L, method, temperature
+            # )
+            # history['icl_swap_acc'].append(icl_swap_acc)
         else:
             # Append None when not evaluating to keep list lengths consistent
             history['iwl_acc'].append(None)
             history['icl_novel_acc'].append(None)
-            history['icl_swap_acc'].append(None)
+            #history['icl_swap_acc'].append(None)
         
         # === Print Progress ===
         if (epoch + 1) % 10 == 0:
             msg = f"Epoch {epoch+1:3d} | Train: {train_acc:.2f}% | Val: {val_acc:.2f}%"
             if (epoch + 1) % eval_frequency == 0 and gmm is not None:
-                msg += f" | IWL: {iwl_acc:.2f}% | ICL-Novel: {icl_novel_acc:.2f}% | ICL-Swap: {icl_swap_acc:.2f}%"
+                msg += f" | IWL: {iwl_acc:.2f}% | ICL: {icl_novel_acc:.2f}%"# | ICL-Swap: {icl_swap_acc:.2f}%"
             print(msg)
     
     return history

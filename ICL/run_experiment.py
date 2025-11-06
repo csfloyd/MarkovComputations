@@ -28,7 +28,7 @@ def parse_args():
     
     # Data parameters
     parser.add_argument('--K', type=int, default=75, help='Number of GMM classes')
-    parser.add_argument('--K_classes', type=int, default=None, help='Number of output classes')
+    parser.add_argument('--L', type=int, default=None, help='Number of output classes')
     parser.add_argument('--D', type=int, default=5, help='Feature dimension')
     parser.add_argument('--N', type=int, default=10, help='Context examples')
     parser.add_argument('--B', type=int, default=2, help='Burstiness')
@@ -79,7 +79,7 @@ def create_model(config):
         model = MatrixTreeMarkovICL(
             n_nodes=config.n_nodes,
             z_dim=config.D,
-            K_classes=config.K_classes,
+            L=config.L,
             N=config.N,
             use_label_mod=config.use_label_mod
         )
@@ -116,23 +116,24 @@ def main():
     gmm = GaussianMixtureModel(
         K=config.K,
         D=config.D,
+        L=config.L,
         epsilon=config.epsilon,
         seed=config.seed
     )
     print(f"  GMM: {config.K} classes, {config.D} dimensions")
-    print(f"  Labels: {gmm.class_to_label[:min(10, config.K)].numpy()}... (1 to {config.K})")
+    print(f"  Labels: {gmm.class_to_label[:min(10, config.K)].numpy()}... (randomly from {{1, ..., {config.L}}})")
     
     # === Generate Data ===
     print("\nGenerating training and validation data...")
     train_data = generate_icl_gmm_data(
         gmm, config.train_samples, config.N,
         novel_classes=False, exact_copy=config.exact_copy,
-        B=config.B, K_classes=config.K_classes
+        B=config.B, L=config.L
     )
     val_data = generate_icl_gmm_data(
         gmm, config.val_samples, config.N,
         novel_classes=False, exact_copy=config.exact_copy,
-        B=config.B, K_classes=config.K_classes
+        B=config.B, L=config.L
     )
     
     train_loader = DataLoader(
@@ -173,7 +174,7 @@ def main():
         gmm=gmm,
         N=config.N,
         B=config.B,
-        K_classes=config.K_classes,
+        L=config.L,
         exact_copy=config.exact_copy,
         eval_frequency=config.eval_frequency,
         n_eval_samples=config.n_eval_samples
@@ -191,7 +192,7 @@ def main():
         exact_copy=config.exact_copy,
         B=config.B,
         method=config.method,
-        K_classes=config.K_classes,
+        L=config.L,
         temperature=config.temperature
     )
     
