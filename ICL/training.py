@@ -12,7 +12,7 @@ from evaluation import evaluate_iwl, evaluate_icl_novel#, evaluate_icl_swap
 
 def train_model(model, train_loader, val_loader, device, n_epochs=200, lr=0.001, 
                 method='direct_solve', temperature=1.0, gmm=None, N=None, B=1, 
-                L=None, exact_copy=True, eval_frequency=10, n_eval_samples=500):
+                L=None, exact_copy=True, eval_frequency=10, n_eval_samples=500, min_max_choice=None):
     """
     Train the classification model with ICL/IWL tracking.
     
@@ -109,13 +109,13 @@ def train_model(model, train_loader, val_loader, device, n_epochs=200, lr=0.001,
             
             # 1. IWL: Target class unlikely to appear in context
             iwl_acc = evaluate_iwl(
-                model, gmm, N, device, n_eval_samples, L, method, temperature
+                model, gmm, N, device, n_eval_samples, L = L, method = method, temperature = temperature
             )
             history['iwl_acc'].append(iwl_acc)
             
             # 2. ICL Primary: Novel classes with B copies in context
             icl_novel_acc = evaluate_icl_novel(
-                model, gmm, N, device, n_eval_samples, exact_copy, B, L, method, temperature
+                model, gmm, N, device, n_eval_samples, exact_copy, B = B, L = L, method = method, temperature = temperature, min_max_choice = min_max_choice
             )
             history['icl_acc'].append(icl_novel_acc)
             

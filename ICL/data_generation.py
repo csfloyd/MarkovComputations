@@ -12,7 +12,7 @@ import numpy as np
 class GaussianMixtureModel:
     """Gaussian Mixture Model with K classes for ICL task with DISCRETE labels."""
     
-    def __init__(self, K, D, L=None, epsilon=0.1, seed=None, label_min=0.0, label_max=1.0):
+    def __init__(self, K, D, L=None, epsilon=0.1, seed=None, label_min=0.0, label_max=1.0, offset=0.0):
         """
         Initialize Gaussian Mixture Model.
         
@@ -37,7 +37,7 @@ class GaussianMixtureModel:
             np.random.seed(seed)
         
         # Sample class means from standard Gaussian scaled by 1/sqrt(D)
-        self.class_means = torch.randn(K, D) / np.sqrt(D)
+        self.class_means = torch.randn(K, D) / np.sqrt(D) + offset * torch.ones(K, D)
         
         # Randomly assign each of K classes a label from {1, 2, ..., L}
         # This allows L < K (multiple classes can share the same label)
@@ -71,7 +71,7 @@ class GaussianMixtureModel:
         return self.class_to_label[class_idx]
 
 
-def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=True, B=1, L=None):
+def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=True, B=1, L=None, shuffle_context=False, min_max_choice = None):
     """
     Generate ICL data from GMM with DISCRETE labels.
     
@@ -88,7 +88,9 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
         label_min: Unused (kept for backwards compatibility)
         label_max: Unused (kept for backwards compatibility)
         L: Number of possible label classes (defaults to gmm.L)
-        
+        shuffle_context: If True, randomly shuffle context and labels (keeping pairs together)
+        min_max_choice: Optional choice of query class ("min", "max", or None for random)
+
     Returns:
         List of tuples (z_seq, labels, target_label) where:
             - z_seq: (N+1, D) tensor of features
@@ -122,7 +124,14 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
                     labels.append(class_label)
 
             # Choose which class the query belongs to (must be in context)
-            query_class_idx = torch.randint(0, n_classes_in_context, (1,)).item()
+            if min_max_choice is None:
+                query_class_idx = torch.randint(0, n_classes_in_context, (1,)).item()
+            elif min_max_choice == "min":
+                query_class_idx = torch.argmin(novel_means).item()
+            elif min_max_choice == "max":
+                query_class_idx = torch.argmax(novel_means).item()
+            else:
+                raise ValueError(f"Invalid min_max_choice: {min_max_choice}")
 
             if exact_copy:
                 # Choose one of the B repeated context items
@@ -132,6 +141,12 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
                 z_query = novel_means[query_class_idx] + gmm.epsilon * torch.randn(gmm.D) / np.sqrt(gmm.D)
 
             target_label = novel_labels[query_class_idx]
+            
+            # Shuffle context if requested
+            if shuffle_context and B > 1:
+                perm = torch.randperm(N)
+                z_context = [z_context[i] for i in perm]
+                labels = [labels[i] for i in perm]
 
         # ------------------------------------------------------------
         # Case 2: Use existing GMM classes
@@ -145,22 +160,37 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
 
             for class_idx in context_classes:
                 class_idx = class_idx.item()
+                base_mean = gmm.class_means[class_idx]
                 class_label = gmm.get_label(class_idx)
                 for _ in range(B):
-                    z_context.append(gmm.sample_from_class(class_idx).squeeze(0))
+                    noise = torch.randn(gmm.D) / np.sqrt(gmm.D)
+                    z_context.append(base_mean + gmm.epsilon * noise)
                     labels.append(class_label)
 
             # Choose query class from among context classes
-            query_class_pos = torch.randint(0, n_classes_in_context, (1,)).item()
+            if min_max_choice is None:
+                query_class_pos = torch.randint(0, n_classes_in_context, (1,)).item()
+            elif min_max_choice == "min":
+                query_class_pos = torch.argmin(gmm.class_means[context_classes]).item()
+            elif min_max_choice == "max":
+                query_class_pos = torch.argmax(gmm.class_means[context_classes]).item()
+            else:
+                raise ValueError(f"Invalid min_max_choice: {min_max_choice}")
             query_class = context_classes[query_class_pos].item()
 
             if exact_copy:
                 copy_offset = torch.randint(0, B, (1,)).item()
                 z_query = z_context[query_class_pos * B + copy_offset].clone()
             else:
-                z_query = gmm.sample_from_class(query_class).squeeze(0)
+                z_query = gmm.class_means[query_class] + gmm.epsilon * torch.randn(gmm.D) / np.sqrt(gmm.D)
 
             target_label = gmm.get_label(query_class)
+            
+            # Shuffle context if requested
+            if shuffle_context and B > 1:
+                perm = torch.randperm(N)
+                z_context = [z_context[i] for i in perm]
+                labels = [labels[i] for i in perm]
 
         # ------------------------------------------------------------
         z_seq = torch.stack(z_context + [z_query])
@@ -168,7 +198,7 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
 
     return data
 
-def generate_iwl_gmm_data(gmm, n_samples, N, B=1):
+def generate_iwl_gmm_data(gmm, n_samples, N, B=1, shuffle_context=False):
     """
     Generate ICL data from GMM with DISCRETE labels.
     
@@ -183,6 +213,7 @@ def generate_iwl_gmm_data(gmm, n_samples, N, B=1):
         label_min: Unused (kept for backwards compatibility)
         label_max: Unused (kept for backwards compatibility)
         L: Number of possible label classes (defaults to gmm.L)
+        shuffle_context: If True, randomly shuffle context and labels (keeping pairs together)
         
     Returns:
         List of tuples (z_seq, labels, target_label) where:
@@ -212,6 +243,12 @@ def generate_iwl_gmm_data(gmm, n_samples, N, B=1):
         query_class = torch.randint(0, gmm.K, (1,)).item()
         z_query = gmm.sample_from_class(query_class).squeeze(0)
         target_label = gmm.get_label(query_class)
+
+        # Shuffle context if requested
+        if shuffle_context and B > 1:
+            perm = torch.randperm(N)
+            z_context = [z_context[i] for i in perm]
+            labels = [labels[i] for i in perm]
 
         # Stack and store
         z_seq = torch.stack(z_context + [z_query])

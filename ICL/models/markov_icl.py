@@ -29,7 +29,8 @@ class MatrixTreeMarkovICL(BaseICLModel):
     4. Aggregate attention by label to get class logits
     """
     
-    def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False):
+    def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False, 
+                 learn_base_rates=True):
         """
         Initialize Markov ICL model.
         
@@ -39,6 +40,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
             L: Number of output classes
             N: Number of context examples
             use_label_mod: Whether to modulate rates by context labels
+            learn_base_rates: Whether to allow gradient updates to base_log_rates
         """
         super().__init__(n_nodes=n_nodes, z_dim=z_dim, L=L, N=N)
         self.n_nodes = n_nodes
@@ -67,11 +69,19 @@ class MatrixTreeMarkovICL(BaseICLModel):
         self.B = nn.Parameter(torch.randn(n_nodes, N) * init_scale_B)
         
         # Base log rates
-        self.base_log_rates = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base)
+        if learn_base_rates:
+            self.base_log_rates = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base)
+        else:
+            self.base_log_rates = nn.Parameter(torch.zeros(n_nodes, n_nodes))
+        
+        # Optionally freeze base_log_rates
+        if not learn_base_rates:
+            self.base_log_rates.requires_grad = False
         
         print(f"  Initialized ICL Attention model (L={L} classes, "
               f"attention over {N} context items)")
         print(f"  Label modulation: {self.use_label_mod}")
+        print(f"  Base rates learnable: {learn_base_rates}")
         print(f"  Parameters: {self.get_num_parameters():,}")
     
     def compute_rate_matrix_K(self, z_batch, labels_batch=None):
@@ -106,7 +116,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
         log_rates = base_expanded + rate_mod
         
         # Clamp for numerical stability
-        log_rates = torch.clamp(log_rates, min=-15.0, max=3.0)
+        log_rates = torch.clamp(log_rates, min=-15.0, max=15.0)
         
         # Exponentiate to get rates
         rates = torch.exp(log_rates)
