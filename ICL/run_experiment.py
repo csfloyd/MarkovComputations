@@ -116,12 +116,11 @@ def main():
     gmm = GaussianMixtureModel(
         K=config.K,
         D=config.D,
-        L=config.L,
         epsilon=config.epsilon,
         seed=config.seed
     )
     print(f"  GMM: {config.K} classes, {config.D} dimensions")
-    print(f"  Labels: {gmm.class_to_label[:min(10, config.K)].numpy()}... (randomly from {{1, ..., {config.L}}})")
+    print(f"  Labels: {gmm.class_to_label[:min(10, config.K)].numpy()}... (1 to {config.K})")
     
     # === Generate Data ===
     print("\nGenerating training and validation data...")

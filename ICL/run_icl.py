@@ -35,23 +35,33 @@ output_dir = args.output
 
 #### discrete test
 # Pre-define all parameters
-L = 32
-K = args.param1
-D = 16
+L = 64
+K = args.param2
+#K = 1024
+#D = 2
+D = args.param1
 N = 8
-B = 2
-n_nodes = 20
-#n_nodes = args.param1
+#N = args.param1
+B = 1
+#n_nodes = args.param2
+n_nodes = 8
 epochs = 1000
-lr = 0.001
+lr = 0.0025
 batch_size = 64
-train_samples = 50000
-val_samples = 10000
-epsilon = 0.1
-seed = 42
+#train_samples = 200000
+#val_samples = 4000
+train_samples = 100000
+val_samples = 2000
+epsilon = 1e-3
+seed = 22
 exact_copy = True
 method = 'direct_solve'
 temperature = 1.0
+shuffle_context = True
+learn_base_rates = False
+offset = 0.0
+min_max_choice = None
+unique_labels = False
 
 # Set parameters
 params = {
@@ -70,7 +80,12 @@ params = {
     'seed': seed,
     'exact_copy': exact_copy,    # Query is exact copy of context item
     'method': method,
-    'temperature': temperature   # Softmax temperature
+    'temperature': temperature,   # Softmax temperature
+    'shuffle_context': shuffle_context,
+    'learn_base_rates': learn_base_rates,
+    'offset': offset,
+    'min_max_choice': min_max_choice,
+    'unique_labels' : unique_labels
 }
 
 print("="*70)
@@ -90,7 +105,7 @@ print(f"Device: {device}\n")
 
 # Create GMM with discrete labels (1 to L)
 print("Creating GMM with discrete labels...")
-gmm = GaussianMixtureModel(K=params['K'], D=params['D'], L=params['L'], epsilon=params['epsilon'], seed=params['seed'])
+gmm = GaussianMixtureModel(K=params['K'], D=params['D'], L=params['L'], epsilon=params['epsilon'], seed=params['seed'], offset=params['offset'])
 print(f"  GMM: {params['K']} classes with labels randomly assigned from {{1, ..., {params['L']}}}")
 print(f"  First 10 class labels: {gmm.class_to_label[:min(10, params['K'])].numpy()}")
 
@@ -98,10 +113,10 @@ print(f"  First 10 class labels: {gmm.class_to_label[:min(10, params['K'])].nump
 print("\nGenerating data...")
 train_data = generate_icl_gmm_data(gmm, params['train_samples'], params['N'], 
                                    novel_classes=False, exact_copy=params['exact_copy'], 
-                                   B=params['B'], L=params['L'])
+                                   B=params['B'], L=params['L'], shuffle_context=params['shuffle_context'], min_max_choice=params['min_max_choice'], unique_labels = params['unique_labels'])
 val_data = generate_icl_gmm_data(gmm, params['val_samples'], params['N'], 
                                  novel_classes=False, exact_copy=params['exact_copy'], 
-                                 B=params['B'], L=params['L'])
+                                 B=params['B'], L=params['L'], shuffle_context=params['shuffle_context'], min_max_choice=params['min_max_choice'], unique_labels = params['unique_labels'])
 
 train_loader = DataLoader(ICLGMMDataset(train_data), batch_size=params['batch_size'],
                           shuffle=True, collate_fn=collate_fn)
@@ -111,7 +126,7 @@ val_loader = DataLoader(ICLGMMDataset(val_data), batch_size=params['batch_size']
 # Create model
 print("\nCreating model...")
 model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
-                           L=params['L'], N=params['N'])
+                           L=params['L'], N=params['N'], learn_base_rates=params['learn_base_rates'])
 
 # Train with ICL/IWL tracking
 start_time = time.time()
@@ -122,7 +137,8 @@ history = train_model(model, train_loader, val_loader, device,
                      method=params['method'], temperature=params['temperature'],
                      gmm=gmm, N=params['N'], B=params['B'], 
                      L=params['L'], exact_copy=params['exact_copy'],
-                     eval_frequency=1, n_eval_samples=500)
+                     eval_frequency=1, n_eval_samples=500, min_max_choice=params['min_max_choice'], unique_labels = params['unique_labels'])
+                     
 end_time = time.time()
 print(f"Training time: {end_time - start_time:.2f} seconds")
 
@@ -130,7 +146,8 @@ print(f"Training time: {end_time - start_time:.2f} seconds")
 results = test_icl(model, gmm, params['N'], device, n_samples=1000, 
                   exact_copy=params['exact_copy'], B=params['B'], 
                   method=params['method'], L=params['L'],
-                  temperature=params['temperature'])
+                  temperature=params['temperature'], shuffle_context=params['shuffle_context'], min_max_choice=params['min_max_choice'], unique_labels = params['unique_labels'])
+
 
 # Save results
 os.makedirs(output_dir, exist_ok=True)

@@ -42,6 +42,11 @@ class GaussianMixtureModel:
         # Randomly assign each of K classes a label from {1, 2, ..., L}
         # This allows L < K (multiple classes can share the same label)
         self.class_to_label = torch.randint(1, self.L + 1, (K,), dtype=torch.float32)
+
+        self.label_to_classes = {
+            int(label): (self.class_to_label == label).nonzero(as_tuple=True)[0].tolist()
+            for label in range(1, self.L + 1)
+        }
         
     def sample_from_class(self, class_idx, n_samples=1):
         """
@@ -71,7 +76,7 @@ class GaussianMixtureModel:
         return self.class_to_label[class_idx]
 
 
-def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=True, B=1, L=None, shuffle_context=False, min_max_choice = None):
+def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=True, B=1, L=None, shuffle_context=False, min_max_choice = None, unique_labels = False):
     """
     Generate ICL data from GMM with DISCRETE labels.
     
@@ -109,7 +114,10 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
         # ------------------------------------------------------------
         if novel_classes:
             novel_means = torch.randn(n_classes_in_context, gmm.D) / np.sqrt(gmm.D)
-            novel_labels = torch.randint(1, K_labels + 1, (n_classes_in_context,), dtype=torch.float32)
+            if unique_labels:
+                novel_labels = torch.randperm(K_labels)[:n_classes_in_context].float() + 1
+            else:
+                novel_labels = torch.randint(1, K_labels + 1, (n_classes_in_context,), dtype=torch.float32)
 
             z_context = []
             labels = []
@@ -153,8 +161,21 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
         # ------------------------------------------------------------
         else:
             # Choose classes that appear in the context
-            context_classes = torch.randint(0, gmm.K, (n_classes_in_context,))
+            if not unique_labels:
+                # --- Original behavior: possibly repeated labels ---
+                context_classes = torch.randint(0, gmm.K, (n_classes_in_context,))
+            else:
+                # --- Unique labels mode: one per distinct label ---
+                # Randomly sample distinct labels
+                n_unique = min(n_classes_in_context, gmm.L)
+                chosen_labels = torch.randperm(gmm.L)[:n_unique] + 1  # labels are 1..L
+                # Pick one random class from each chosen label group
+                context_classes = torch.tensor([
+                    np.random.choice(gmm.label_to_classes[int(lbl.item())])
+                    for lbl in chosen_labels
+                ], dtype=torch.long)
 
+            # --- Generate context data ---
             z_context = []
             labels = []
 
