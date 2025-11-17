@@ -30,7 +30,8 @@ class MatrixTreeMarkovICL(BaseICLModel):
     """
     
     def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False, 
-                 learn_base_rates=True):
+                 learn_base_rates=True, transform_func='exp', 
+                 sparsity_rho_edge=1.0, sparsity_rho_all=1.0):
         """
         Initialize Markov ICL model.
         
@@ -41,10 +42,16 @@ class MatrixTreeMarkovICL(BaseICLModel):
             N: Number of context examples
             use_label_mod: Whether to modulate rates by context labels
             learn_base_rates: Whether to allow gradient updates to base_log_rates
+            transform_func: Transformation function for rates ('exp', 'relu', 'elu')
+            sparsity_rho_edge: Fraction of non-zero elements in per-edge mask (n_nodes x n_nodes)
+            sparsity_rho_all: Fraction of non-zero elements in per-element mask (all dims)
         """
         super().__init__(n_nodes=n_nodes, z_dim=z_dim, L=L, N=N)
         self.n_nodes = n_nodes
         self.use_label_mod = use_label_mod
+        self.transform_func = transform_func
+        self.sparsity_rho_edge = sparsity_rho_edge
+        self.sparsity_rho_all = sparsity_rho_all
         
         z_full_dim = (N + 1) * z_dim  # Flatten all context + query
         l_full_dim = N
@@ -78,11 +85,57 @@ class MatrixTreeMarkovICL(BaseICLModel):
         if not learn_base_rates:
             self.base_log_rates.requires_grad = False
         
+        # Create sparsity masks for K_params
+        self._create_sparsity_masks(z_full_dim)
+        
         print(f"  Initialized ICL Attention model (L={L} classes, "
               f"attention over {N} context items)")
         print(f"  Label modulation: {self.use_label_mod}")
         print(f"  Base rates learnable: {learn_base_rates}")
+        print(f"  Sparsity: rho_edge={sparsity_rho_edge:.3f}, rho_all={sparsity_rho_all:.3f}")
+        sparsity_stats = self.get_sparsity_stats()
+        if sparsity_stats:
+            print(f"  K_params sparsity: {sparsity_stats['actual_sparsity']:.3f} "
+                  f"({sparsity_stats['num_active_params']}/{sparsity_stats['num_total_params']} active)")
         print(f"  Parameters: {self.get_num_parameters():,}")
+    
+    def _create_sparsity_masks(self, z_full_dim):
+        """
+        Create sparsity masks for K_params using two-level masking.
+        
+        Per-edge mask: (n_nodes, n_nodes, 1) - controls which (i,j) edges exist
+        Per-element mask: (n_nodes, n_nodes, z_full_dim) - controls sparsity within each edge
+        
+        Final mask is element-wise product: only survives if both masks are 1.
+        
+        Args:
+            z_full_dim: Full dimension of z features
+        """
+        n = self.n_nodes
+        
+        # Per-edge mask: same across all input dimensions
+        if self.sparsity_rho_edge < 1.0:
+            # Generate uniform [0,1] samples and keep if < rho_edge
+            edge_mask_samples = torch.rand(n, n, 1)
+            edge_mask = (edge_mask_samples < self.sparsity_rho_edge).float()
+            # Broadcast to full dimension
+            edge_mask = edge_mask.expand(-1, -1, z_full_dim).contiguous()
+        else:
+            edge_mask = torch.ones(n, n, z_full_dim)
+        
+        # Per-element mask: independent for each element
+        if self.sparsity_rho_all < 1.0:
+            # Generate uniform [0,1] samples and keep if < rho_all
+            element_mask_samples = torch.rand(n, n, z_full_dim)
+            element_mask = (element_mask_samples < self.sparsity_rho_all).float()
+        else:
+            element_mask = torch.ones(n, n, z_full_dim)
+        
+        # Combine masks: element survives only if both masks are 1
+        combined_mask = edge_mask * element_mask
+        
+        # Register as buffer (moves with model to device, not trained)
+        self.register_buffer('K_params_mask', combined_mask)
     
     def compute_rate_matrix_K(self, z_batch, labels_batch=None):
         """
@@ -101,8 +154,11 @@ class MatrixTreeMarkovICL(BaseICLModel):
         batch_size = z_batch.shape[0]
         n = self.n_nodes
         
+        # Apply sparsity mask to K_params
+        K_params_masked = self.K_params * self.K_params_mask
+        
         # Compute modulation: K_params · z
-        K_expanded = self.K_params.unsqueeze(0).expand(batch_size, -1, -1, -1)
+        K_expanded = K_params_masked.unsqueeze(0).expand(batch_size, -1, -1, -1)
         rate_mod = torch.einsum('bijd,bd->bij', K_expanded, z_batch)
         
         # Optional: Add label modulation
@@ -119,7 +175,15 @@ class MatrixTreeMarkovICL(BaseICLModel):
         log_rates = torch.clamp(log_rates, min=-15.0, max=15.0)
         
         # Exponentiate to get rates
-        rates = torch.exp(log_rates)
+        if self.transform_func == 'exp':
+            rates = torch.exp(log_rates)
+        elif self.transform_func == 'relu':
+            rates = torch.relu(log_rates) + 1e-10
+        elif self.transform_func == 'elu':
+            rates = torch.nn.functional.elu(log_rates) # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.elu_.html
+        else:
+            raise ValueError(f"Invalid transform function: {self.transform_func}")
+
         
         # Zero out diagonal (we'll set it later)
         eye = torch.eye(n, device=rates.device).unsqueeze(0)
@@ -318,4 +382,53 @@ class MatrixTreeMarkovICL(BaseICLModel):
         logits = torch.log(logits)
         
         return logits
+    
+    def get_sparsity_stats(self):
+        """
+        Get statistics about K_params sparsity.
+        
+        Returns:
+            dict with sparsity information, or None if no sparsity mask exists
+        """
+        if not hasattr(self, 'K_params_mask'):
+            return None
+        
+        mask = self.K_params_mask
+        num_total = mask.numel()
+        num_active = mask.sum().item()
+        actual_sparsity = 1.0 - (num_active / num_total)
+        
+        return {
+            'rho_edge': self.sparsity_rho_edge,
+            'rho_all': self.sparsity_rho_all,
+            'actual_sparsity': actual_sparsity,
+            'num_active_params': int(num_active),
+            'num_total_params': num_total,
+            'fraction_active': num_active / num_total
+        }
+    
+    def resample_sparsity_mask(self):
+        """
+        Re-randomize the sparsity mask with same rho values.
+        Useful for experiments testing different random masks.
+        """
+        z_full_dim = self.K_params.shape[2]
+        self._create_sparsity_masks(z_full_dim)
+    
+    def get_active_edges(self):
+        """
+        Get list of (i, j) node pairs that have at least one active parameter.
+        
+        Returns:
+            List of tuples [(i, j), ...] representing active edges
+        """
+        if not hasattr(self, 'K_params_mask'):
+            # No mask, all edges are active
+            return [(i, j) for i in range(self.n_nodes) for j in range(self.n_nodes)]
+        
+        # Sum across z_dim to see which (i,j) pairs have any active params
+        edge_active = self.K_params_mask.sum(dim=2) > 0  # (n_nodes, n_nodes)
+        active_indices = torch.nonzero(edge_active, as_tuple=False)
+        
+        return [(i.item(), j.item()) for i, j in active_indices]
 
