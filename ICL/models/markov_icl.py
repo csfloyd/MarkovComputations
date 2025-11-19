@@ -89,6 +89,9 @@ class MatrixTreeMarkovICL(BaseICLModel):
         # Note: To get zero base rates, set sparsity_rho_edge_base_W = 0.0 with base_mask_value = 0.0
         self.base_log_rates_W = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base)
         
+        # Set fixed seed for sparsity mask generation (ensures reproducibility across models)
+        torch.manual_seed(42)
+        
         # Create sparsity masks for K_params and base rates
         self._create_sparsity_masks(z_full_dim)
         
@@ -367,6 +370,79 @@ class MatrixTreeMarkovICL(BaseICLModel):
         
         return p_batch
     
+    def newton_steady_state(self, W_batch, n_iter=10, eps=1e-12, tol=1e-8):
+        """
+        Newton's method for solving W p = 0 with sum(p) = 1.
+        
+        For the linear steady state problem, this iteratively refines the solution
+        using Newton's method with the constraint that probabilities sum to 1.
+        
+        Args:
+            W_batch: (batch_size, n_nodes, n_nodes) - rate matrix
+            n_iter: Number of Newton iterations (default: 10)
+            eps: Minimum value for clamping probabilities (default: 1e-12)
+            tol: Convergence tolerance for ||W p|| (default: 1e-8)
+            
+        Returns:
+            p_batch: (batch_size, n_nodes) - steady state distributions
+        """
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
+        
+        # Initialize from uniform distribution
+        p_batch = torch.full((batch_size, n), 1.0/n, device=device)
+        
+        for iteration in range(n_iter):
+            # Compute F(p) = W p
+            F = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)  # (batch_size, n)
+            
+            # Check convergence
+            F_norm = torch.abs(F).max()
+            if F_norm < tol:
+                break
+            
+            # For linear case, Jacobian J = W
+            # We modify the system to enforce sum(p) = 1 by replacing last row
+            J_constrained = W_batch.clone()
+            J_constrained[:, -1, :] = 1.0
+            
+            # RHS: -F with constraint correction
+            b = -F
+            b[:, -1] = 1.0 - p_batch.sum(dim=1)  # Enforce sum constraint
+            
+            # Solve J * delta_p = b for the Newton step
+            try:
+                delta_p = torch.linalg.solve(J_constrained, b)
+            except RuntimeError:
+                # Fallback: add regularization if singular
+                J_reg = J_constrained + 1e-6 * torch.eye(n, device=device).unsqueeze(0)
+                delta_p = torch.linalg.solve(J_reg, b)
+            
+            # Update with full Newton step
+            p_batch = p_batch + delta_p
+            
+            # Project onto probability simplex: clamp and normalize
+            p_batch = torch.clamp(p_batch, min=eps)
+            p_batch = p_batch / p_batch.sum(dim=1, keepdim=True)
+        
+        # Handle NaN/Inf (fallback to uniform)
+        mask = torch.isnan(p_batch).any(dim=1) | torch.isinf(p_batch).any(dim=1)
+        if mask.any():
+            p_batch[mask] = 1.0 / n
+        
+        # Verify steady state quality
+        with torch.no_grad():
+            F_final = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+            max_drift = torch.abs(F_final).max().item()
+            
+            max_drift_tol = 1e-3
+            if max_drift > max_drift_tol:
+                print("WARNING: Newton steady state did not converge properly!")
+                print(f"  Max drift: {max_drift:.2e} (threshold: {max_drift_tol:.2e})")
+                print(f"  Iterations: {iteration + 1}/{n_iter}")
+        
+        return p_batch
+    
     def forward(self, z_seq_batch, labels_seq_batch, method='direct_solve', temperature=1.0):
         """
         Forward pass with attention over context items.
@@ -382,7 +458,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
             z_seq_batch: (batch_size, N+1, z_dim)
             labels_seq_batch: (batch_size, N) - context labels (1 to L)
             method: str - method for computing steady state
-                'matrix_tree', 'linear_solver', or 'direct_solve'
+                'matrix_tree', 'linear_solver', 'direct_solve', or 'newton'
             temperature: float - softmax temperature (default 1.0)
             
         Returns:
@@ -404,6 +480,8 @@ class MatrixTreeMarkovICL(BaseICLModel):
             p_batch = self.linear_solver_steady_state(W_batch)
         elif method == 'direct_solve':
             p_batch = self.direct_solve_steady_state(W_batch)
+        elif method == 'newton':
+            p_batch = self.newton_steady_state(W_batch, n_iter = 30)
         else:
             raise ValueError(f"Invalid method: {method}")
         

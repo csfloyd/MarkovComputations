@@ -35,11 +35,11 @@ class NonlinearMarkovICL(BaseICLModel):
     """
     
     def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False, 
-                 learn_base_rates=True, transform_func='exp', 
+                 learn_base_rates_W=True, learn_base_rates_Y=True, transform_func='exp', 
                  sparsity_rho_edge_K=1.0, sparsity_rho_all_K=1.0,
                  sparsity_rho_edge_L=1.0, sparsity_rho_all_L=1.0,
                  sparsity_rho_edge_base_W=1.0, sparsity_rho_edge_base_Y=1.0,
-                 base_mask_value=0.0):
+                 base_mask_value=0.0, symmetrize_Y=True):
         """
         Initialize Nonlinear Markov ICL model.
         
@@ -49,7 +49,8 @@ class NonlinearMarkovICL(BaseICLModel):
             L: Number of output classes
             N: Number of context examples
             use_label_mod: Whether to modulate rates by context labels
-            learn_base_rates: Whether to allow gradient updates to unmasked base rates
+            learn_base_rates_W: Whether to allow gradient updates to unmasked base rates for W
+            learn_base_rates_Y: Whether to allow gradient updates to unmasked base rates for Y
             transform_func: Transformation function for rates ('exp', 'relu', 'elu')
             sparsity_rho_edge_K: Fraction of non-zero elements in per-edge mask for K_params
             sparsity_rho_all_K: Fraction of non-zero elements in per-element mask for K_params
@@ -58,11 +59,13 @@ class NonlinearMarkovICL(BaseICLModel):
             sparsity_rho_edge_base_W: Fraction of (i,j) edges with base rates in W
             sparsity_rho_edge_base_Y: Fraction of (i,j,k) triplets with base rates in Y
             base_mask_value: Value for masked base rates (0.0 or float('-inf'))
+            symmetrize_Y: Whether to enforce Y_{i,j,k} = Y_{i,k,j} symmetry (default True)
         """
         super().__init__(n_nodes=n_nodes, z_dim=z_dim, L=L, N=N)
         self.n_nodes = n_nodes
         self.use_label_mod = use_label_mod
         self.transform_func = transform_func
+        self.symmetrize_Y = symmetrize_Y
         self.sparsity_rho_edge_K = sparsity_rho_edge_K
         self.sparsity_rho_all_K = sparsity_rho_all_K
         self.sparsity_rho_edge_L = sparsity_rho_edge_L
@@ -70,7 +73,8 @@ class NonlinearMarkovICL(BaseICLModel):
         self.sparsity_rho_edge_base_W = sparsity_rho_edge_base_W
         self.sparsity_rho_edge_base_Y = sparsity_rho_edge_base_Y
         self.base_mask_value = base_mask_value
-        self.learn_base_rates = learn_base_rates
+        self.learn_base_rates_W = learn_base_rates_W
+        self.learn_base_rates_Y = learn_base_rates_Y
         
         z_full_dim = (N + 1) * z_dim  # Flatten all context + query
         l_full_dim = N
@@ -82,45 +86,69 @@ class NonlinearMarkovICL(BaseICLModel):
         init_base_K = -2.0 - 0.5 * np.log(n_nodes)
         init_base_L = -3.0 - 0.5 * np.log(n_nodes)  # Smaller base for nonlinear term
         
+        # ============================================================
+        # LINEAR COMPONENTS (initialized in same order as linear model)
+        # ============================================================
+        
         # Learnable parameters for rate matrix W (K maps z → W)
         self.K_params = nn.Parameter(torch.randn(n_nodes, n_nodes, z_full_dim) * init_scale_K)
         
-        # Learnable parameters for rate tensor Y (L maps z → Y)
-        self.L_params = nn.Parameter(torch.randn(n_nodes, n_nodes, n_nodes, z_full_dim) * init_scale_L)
-        
-        # Optional: modulate rates by context labels
+        # Optional: modulate rates by context labels (linear part only)
         if self.use_label_mod:
             self.label_modulation_K = nn.Parameter(
                 torch.randn(n_nodes, n_nodes, l_full_dim) * init_scale_K * 0.5
             )
-            self.label_modulation_L = nn.Parameter(
-                torch.randn(n_nodes, n_nodes, n_nodes, l_full_dim) * init_scale_L * 0.5
-            )
         else:
             self.label_modulation_K = None
-            self.label_modulation_L = None
         
         # B maps steady state to context position scores (attention mechanism)
         self.B = nn.Parameter(torch.randn(n_nodes, N) * init_scale_B)
         
-        # Base log rates for W and Y
-        # Note: To get zero base rates, set sparsity_rho_edge_base_W/Y = 0.0 with base_mask_value = 0.0
+        # Base log rates for W
+        # Note: To get zero base rates, set sparsity_rho_edge_base_W = 0.0 with base_mask_value = 0.0
         self.base_log_rates_W = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base_K)
-        self.base_log_rates_Y = nn.Parameter(torch.randn(n_nodes, n_nodes, n_nodes) * 0.1 + init_base_L)
         
-        # Create sparsity masks for K_params, L_params, and base rates
-        self._create_sparsity_masks(z_full_dim)
+        # Set fixed seed for sparsity mask generation (ensures reproducibility across models)
+        torch.manual_seed(42)
         
-        # Set up gradient masking for base rates if learn_base_rates is False
-        # or if we want to only learn unmasked base rates
-        if not learn_base_rates:
+        # Create sparsity masks for K_params and base_W
+        self._create_linear_sparsity_masks(z_full_dim)
+        
+        # Set up gradient masking for base rates W
+        if not learn_base_rates_W:
             self.base_log_rates_W.requires_grad = False
-            self.base_log_rates_Y.requires_grad = False
         else:
             # Register hooks to zero out gradients for masked base rates
             self.base_log_rates_W.register_hook(
                 lambda grad: grad * self.base_log_rates_W_mask
             )
+        
+        # ============================================================
+        # NONLINEAR COMPONENTS (initialized after linear components)
+        # ============================================================
+        
+        # Learnable parameters for rate tensor Y (L maps z → Y)
+        self.L_params = nn.Parameter(torch.randn(n_nodes, n_nodes, n_nodes, z_full_dim) * init_scale_L)
+        
+        # Optional: modulate rates by context labels (nonlinear part)
+        if self.use_label_mod:
+            self.label_modulation_L = nn.Parameter(
+                torch.randn(n_nodes, n_nodes, n_nodes, l_full_dim) * init_scale_L * 0.5
+            )
+        else:
+            self.label_modulation_L = None
+        
+        # Base log rates for Y
+        self.base_log_rates_Y = nn.Parameter(torch.randn(n_nodes, n_nodes, n_nodes) * 0.1 + init_base_L)
+        
+        # Create sparsity masks for L_params and base_Y (can use same or different seed)
+        self._create_nonlinear_sparsity_masks(z_full_dim)
+        
+        # Set up gradient masking for base rates Y
+        if not learn_base_rates_Y:
+            self.base_log_rates_Y.requires_grad = False
+        else:
+            # Register hooks to zero out gradients for masked base rates
             self.base_log_rates_Y.register_hook(
                 lambda grad: grad * self.base_log_rates_Y_mask
             )
@@ -128,8 +156,9 @@ class NonlinearMarkovICL(BaseICLModel):
         print(f"  Initialized Nonlinear Markov ICL model (L={L} classes, "
               f"attention over {N} context items)")
         print(f"  Nonlinear dynamics: W p + p Y p = 0")
+        print(f"  Symmetrize Y tensor: {symmetrize_Y} (Y_ijk = Y_ikj)")
         print(f"  Label modulation: {self.use_label_mod}")
-        print(f"  Base rates learnable: {learn_base_rates}")
+        print(f"  Base rates learnable W: {learn_base_rates_W}, Y: {learn_base_rates_Y}")
         print(f"  Base mask value: {base_mask_value}")
         print(f"  Sparsity K: rho_edge={sparsity_rho_edge_K:.3f}, rho_all={sparsity_rho_all_K:.3f}")
         print(f"  Sparsity L: rho_edge={sparsity_rho_edge_L:.3f}, rho_all={sparsity_rho_all_L:.3f}")
@@ -147,27 +176,18 @@ class NonlinearMarkovICL(BaseICLModel):
                   f"({sparsity_stats['base_Y_num_active']}/{sparsity_stats['base_Y_num_total']} active)")
         print(f"  Parameters: {self.get_num_parameters():,}")
     
-    def _create_sparsity_masks(self, z_full_dim):
+    def _create_linear_sparsity_masks(self, z_full_dim):
         """
-        Create sparsity masks for K_params, L_params, and base rates.
+        Create sparsity masks for K_params and base_log_rates_W (linear components).
         
         For K_params (n_nodes, n_nodes, z_full_dim):
             - Per-edge mask: (n_nodes, n_nodes, 1) - controls which (i,j) edges exist
             - Per-element mask: (n_nodes, n_nodes, z_full_dim) - controls sparsity within each edge
         
-        For L_params (n_nodes, n_nodes, n_nodes, z_full_dim):
-            - Per-triplet mask: (n_nodes, n_nodes, n_nodes, 1) - controls which (i,j,k) triplets exist
-            - Per-element mask: (n_nodes, n_nodes, n_nodes, z_full_dim) - controls sparsity within each triplet
-        
         For base_log_rates_W (n_nodes, n_nodes):
             - Per-edge mask: (n_nodes, n_nodes) - controls which (i,j) edges have base rates
             - IMPORTANT: Automatically set to 1 (enabled) for any edge where K_params is active
               This ensures edges with learnable K parameters aren't permanently disabled by -inf base rates
-        
-        For base_log_rates_Y (n_nodes, n_nodes, n_nodes):
-            - Per-triplet mask: (n_nodes, n_nodes, n_nodes) - controls which (i,j,k) triplets have base rates
-            - IMPORTANT: Automatically set to 1 (enabled) for any triplet where L_params is active
-              This ensures triplets with learnable L parameters aren't permanently disabled by -inf base rates
         
         Final mask is element-wise product: only survives if both masks are 1.
         
@@ -201,6 +221,43 @@ class NonlinearMarkovICL(BaseICLModel):
         # Register as buffer (moves with model to device, not trained)
         self.register_buffer('K_params_mask', combined_mask_K)
         
+        # ==================== base_log_rates_W mask ====================
+        if self.sparsity_rho_edge_base_W < 1.0:
+            # Generate uniform [0,1] samples and keep if < rho_edge_base_W
+            edge_mask_samples_W = torch.rand(n, n)
+            base_mask_W = (edge_mask_samples_W < self.sparsity_rho_edge_base_W).float()
+        else:
+            base_mask_W = torch.ones(n, n)
+        
+        # IMPORTANT: Override base mask for edges where K_params is active
+        # If K_params has active parameters for edge (i,j), force base_W mask to 1
+        # This ensures -inf base rates don't permanently disable edges that can be learned via K
+        k_edge_active = (combined_mask_K.sum(dim=2) > 0).float()  # (n, n) - 1 if any K param is active
+        base_mask_W = torch.maximum(base_mask_W, k_edge_active)
+        
+        # Register as buffer
+        self.register_buffer('base_log_rates_W_mask', base_mask_W)
+    
+    def _create_nonlinear_sparsity_masks(self, z_full_dim):
+        """
+        Create sparsity masks for L_params and base_log_rates_Y (nonlinear components).
+        
+        For L_params (n_nodes, n_nodes, n_nodes, z_full_dim):
+            - Per-triplet mask: (n_nodes, n_nodes, n_nodes, 1) - controls which (i,j,k) triplets exist
+            - Per-element mask: (n_nodes, n_nodes, n_nodes, z_full_dim) - controls sparsity within each triplet
+        
+        For base_log_rates_Y (n_nodes, n_nodes, n_nodes):
+            - Per-triplet mask: (n_nodes, n_nodes, n_nodes) - controls which (i,j,k) triplets have base rates
+            - IMPORTANT: Automatically set to 1 (enabled) for any triplet where L_params is active
+              This ensures triplets with learnable L parameters aren't permanently disabled by -inf base rates
+        
+        Final mask is element-wise product: only survives if both masks are 1.
+        
+        Args:
+            z_full_dim: Full dimension of z features
+        """
+        n = self.n_nodes
+        
         # ==================== L_params mask ====================
         # Per-triplet mask: same across all input dimensions
         if self.sparsity_rho_edge_L < 1.0:
@@ -225,23 +282,6 @@ class NonlinearMarkovICL(BaseICLModel):
         
         # Register as buffer (moves with model to device, not trained)
         self.register_buffer('L_params_mask', combined_mask_L)
-        
-        # ==================== base_log_rates_W mask ====================
-        if self.sparsity_rho_edge_base_W < 1.0:
-            # Generate uniform [0,1] samples and keep if < rho_edge_base_W
-            edge_mask_samples_W = torch.rand(n, n)
-            base_mask_W = (edge_mask_samples_W < self.sparsity_rho_edge_base_W).float()
-        else:
-            base_mask_W = torch.ones(n, n)
-        
-        # IMPORTANT: Override base mask for edges where K_params is active
-        # If K_params has active parameters for edge (i,j), force base_W mask to 1
-        # This ensures -inf base rates don't permanently disable edges that can be learned via K
-        k_edge_active = (combined_mask_K.sum(dim=2) > 0).float()  # (n, n) - 1 if any K param is active
-        base_mask_W = torch.maximum(base_mask_W, k_edge_active)
-        
-        # Register as buffer
-        self.register_buffer('base_log_rates_W_mask', base_mask_W)
         
         # ==================== base_log_rates_Y mask ====================
         if self.sparsity_rho_edge_base_Y < 1.0:
@@ -301,7 +341,7 @@ class NonlinearMarkovICL(BaseICLModel):
         log_rates = base_expanded + rate_mod
         
         # Clamp for numerical stability
-        log_rates = torch.clamp(log_rates, min=-15.0, max=15.0)
+        log_rates = torch.clamp(log_rates, min=-50.0, max=15.0)
         
         # Apply transformation to get rates
         if self.transform_func == 'exp':
@@ -367,7 +407,8 @@ class NonlinearMarkovICL(BaseICLModel):
         log_rates = base_expanded + rate_mod
         
         # Clamp for numerical stability
-        log_rates = torch.clamp(log_rates, min=-15.0, max=15.0)
+        #log_rates = torch.clamp(log_rates, min=-2.0, max=0.0)
+        log_rates = torch.clamp(log_rates, min=-50.0, max=-2.0)
         
         # Apply transformation to get rates
         if self.transform_func == 'exp':
@@ -378,6 +419,11 @@ class NonlinearMarkovICL(BaseICLModel):
             rates = torch.nn.functional.elu(log_rates) + 1e-10
         else:
             raise ValueError(f"Invalid transform function: {self.transform_func}")
+        
+        # Symmetrize Y tensor: Y[i,j,k] = (Y[i,j,k] + Y[i,k,j]) / 2
+        # This enforces Y_{i,j,k} = Y_{i,k,j} without changing dynamics since p_j p_k = p_k p_j
+        if self.symmetrize_Y:
+            rates = 0.5 * (rates + rates.transpose(2, 3))
         
         # Zero out diagonal elements Y[j,j,k] (we'll set them later)
         # Create a mask for the diagonal in the first two dimensions: i==j
@@ -394,6 +440,10 @@ class NonlinearMarkovICL(BaseICLModel):
         
         return Y_batch
     
+    # def compute_rate_tensor_Y(self, z_batch, labels_batch=None):
+    #     # Don't compute anything, just return zeros with no gradient
+    #     return torch.zeros(z_batch.shape[0], self.n_nodes, self.n_nodes, self.n_nodes, 
+    #                     device=z_batch.device, requires_grad=False)
     
     def direct_solve_steady_state(self, W_batch, Y_batch, n_iter=50, step_size=0.1, eps=1e-12):
         """
@@ -444,9 +494,104 @@ class NonlinearMarkovICL(BaseICLModel):
         if mask.any():
             p_batch[mask] = 1.0 / n
         
+        # Verify steady state quality
+        with torch.no_grad():
+            outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+            Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+            L = torch.einsum("bij,bj->bi", W_batch, p_batch)
+            F_final = L + Q
+            max_drift = torch.abs(F_final).max().item()
+            
+            if max_drift > 1e-3:
+                print(f"WARNING: Direct solve steady state did not converge properly!")
+                print(f"  Max drift: {max_drift:.2e} (threshold: 1e-5)")
+                print(f"  Iterations: {n_iter}, Step size: {step_size}")
+        
         return p_batch
 
-    def newton_steady_state(self, W_batch, Y_batch, n_iter=5, eps=1e-12, tol=1e-8):
+    # def newton_steady_state(self, W_batch, Y_batch, n_iter=5, eps=1e-12, tol=1e-8):
+    #     """
+    #     Newton's method for solving W p + p Y p = 0 with backtracking line search.
+        
+    #     Much faster convergence (typically 5-10 iterations vs 50+)
+    #     """
+    #     batch_size, n = W_batch.shape[0], self.n_nodes
+    #     device = W_batch.device
+        
+    #     # Initialize from uniform distribution
+    #     p_batch = torch.full((batch_size, n), 1.0/n, device=device)
+        
+    #     for _ in range(n_iter):
+    #         # Compute F(p) = W p + p Y p
+    #         outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+    #         Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+    #         L = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+    #         F = L + Q
+            
+    #         # Check convergence
+    #         F_norm = torch.abs(F).max()
+    #         if F_norm < tol:
+    #             break
+            
+    #         # Compute Jacobian: J[i,j] = dF_i/dp_j
+    #         # J = W + (Y[:,:,j,k] + Y[:,i,k,j]) * p_k (summed over k)
+    #         # For quadratic term: d/dp_j (sum_k,l Y[i,k,l] p_k p_l) = sum_l Y[i,j,l]*p_l + sum_k Y[i,k,j]*p_k
+            
+    #         # Simplified: J = W + 2 * (Y contracted with p on last index)
+    #         Y_p_contract = torch.einsum("bijk,bk->bij", Y_batch, p_batch)  # (b, n, n)
+    #         Y_p_contract_T = torch.einsum("bijk,bj->bik", Y_batch, p_batch)  # (b, n, n)
+    #         J = W_batch + Y_p_contract + Y_p_contract_T  # (batch, n, n)
+            
+    #         # Add constraint: last row enforces sum(p) = 1
+    #         J_constrained = J.clone()
+    #         J_constrained[:, -1, :] = 1.0
+            
+    #         # RHS
+    #         b = -F
+    #         b[:, -1] = 1.0 - p_batch.sum(dim=1)  # Enforce sum constraint
+            
+    #         # Solve J * delta_p = -F
+    #         delta_p = torch.linalg.solve(J_constrained, b)
+            
+    #         # Backtracking line search
+    #         alpha = 1.0
+    #         rho = 0.5  # backtracking factor
+    #         for _ in range(10):
+    #             p_new = p_batch + alpha * delta_p
+    #             p_new = torch.clamp(p_new, min=eps)
+    #             p_new = p_new / p_new.sum(dim=1, keepdim=True)
+                
+    #             # Compute new residual
+    #             outer_new = p_new.unsqueeze(2) * p_new.unsqueeze(1)
+    #             Q_new = torch.einsum("bijk,bjk->bi", Y_batch, outer_new)
+    #             L_new = torch.bmm(W_batch, p_new.unsqueeze(-1)).squeeze(-1)
+    #             F_new = L_new + Q_new
+    #             F_new_norm = torch.abs(F_new).max()
+                
+    #             # Accept if residual decreased or step size too small
+    #             if F_new_norm < F_norm or alpha < 0.01:
+    #                 break
+    #             alpha *= rho
+            
+    #         p_batch = p_new
+        
+    #     # Verify steady state quality
+    #     with torch.no_grad():
+    #         outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+    #         Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+    #         L = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+    #         F_final = L + Q
+    #         max_drift = torch.abs(F_final).max().item()
+            
+    #         max_drift_tol = 1e-3
+    #         if max_drift > max_drift_tol:
+    #             print(f"WARNING: Newton steady state did not converge properly!")
+    #             print(f"  Max drift: {max_drift:.2e} (threshold: {max_drift_tol:.2e})")
+    #             print(f"  Iterations: {n_iter}")
+        
+    #     return p_batch
+
+    def newton_steady_state(self, W_batch, Y_batch, n_iter=10, eps=1e-12, tol=1e-8):
         """
         Newton's method for solving W p + p Y p = 0.
         
@@ -534,7 +679,7 @@ class NonlinearMarkovICL(BaseICLModel):
         
         # Compute steady state (currently only direct_solve is implemented for nonlinear case)
         if method == 'newton':
-            p_batch = self.newton_steady_state(W_batch, Y_batch, n_iter=10)
+            p_batch = self.newton_steady_state(W_batch, Y_batch, n_iter=30)
         elif method == 'direct_solve':
             p_batch = self.direct_solve_steady_state(W_batch, Y_batch, n_iter=n_iter, step_size=step_size)
         else:
@@ -629,14 +774,22 @@ class NonlinearMarkovICL(BaseICLModel):
         Resamples masks for K_params, L_params, base_log_rates_W, and base_log_rates_Y.
         """
         z_full_dim = self.K_params.shape[2]
-        self._create_sparsity_masks(z_full_dim)
         
-        # Re-register gradient hooks for base rates if learn_base_rates is True
-        if self.learn_base_rates:
+        # Resample with fixed seed for reproducibility
+        torch.manual_seed(42)
+        self._create_linear_sparsity_masks(z_full_dim)
+        self._create_nonlinear_sparsity_masks(z_full_dim)
+        
+        # Re-register gradient hooks for base rates W if learn_base_rates_W is True
+        if self.learn_base_rates_W:
             # Remove old hooks (they're automatically replaced when re-registering)
             self.base_log_rates_W.register_hook(
                 lambda grad: grad * self.base_log_rates_W_mask
             )
+        
+        # Re-register gradient hooks for base rates Y if learn_base_rates_Y is True
+        if self.learn_base_rates_Y:
+            # Remove old hooks (they're automatically replaced when re-registering)
             self.base_log_rates_Y.register_hook(
                 lambda grad: grad * self.base_log_rates_Y_mask
             )
