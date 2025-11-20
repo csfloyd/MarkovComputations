@@ -51,39 +51,49 @@ unique_labels = False        # If True, ensure all context labels are unique
 # ============================================================
 # Model Architecture Parameters
 # ============================================================
-n_nodes = 8                  # Number of nodes in the Markov chain
+n_nodes = 5                  # Number of nodes in the Markov chain
 transform_func = 'exp'       # Transformation function: 'exp', 'relu', or 'elu'
-learn_base_rates = False     # If True, allow gradient updates to unmasked base rates
+learn_base_rates_W = True    # If True, allow gradient updates to unmasked base rates for W
+learn_base_rates_Y = True   # If True, allow gradient updates to unmasked base rates for Y
+symmetrize_Y = True          # Whether to enforce Y_{i,j,k} = Y_{i,k,j} symmetry
 
 # ============================================================
 # Sparsity Parameters - K_params (context-dependent modulation)
 # ============================================================
-sparsity_rho_edge = 1.0      # Fraction of (i,j) edges with K parameters
-sparsity_rho_all = 1.0       # Fraction of individual K parameters to keep
+sparsity_rho_edge_K = 0.5    # Fraction of (i,j) edges with K parameters (0.0 = all masked)
+sparsity_rho_all_K = 0.5     # Fraction of individual K parameters to keep (0.0 = all masked)
+
+# ============================================================
+# Sparsity Parameters - L_params (nonlinear interactions)
+# ============================================================
+sparsity_rho_edge_L = 0.0    # Fraction of (i,j,k) triplets with L parameters
+sparsity_rho_all_L = 0.0    # Fraction of individual L parameters to keep
 
 # ============================================================
 # Sparsity Parameters - Base Rates
 # ============================================================
 sparsity_rho_edge_base_W = 1.0   # Fraction of (i,j) edges with base rates in W
-base_mask_value = float('-inf')            # Value for masked base rates: 0.0 (no bias) or float('-inf') (disable edge)
+sparsity_rho_edge_base_Y = 0.1  # Fraction of (i,j,k) triplets with base rates in Y
+base_mask_value = float('-inf')  # Value for masked base rates: 0.0 (no bias) or float('-inf') (disable edge)
 
 # ============================================================
 # Training Parameters
 # ============================================================
-epochs = 100                  # Number of training epochs
+epochs = 50                  # Number of training epochs
 lr = 0.0025                  # Learning rate
 batch_size = 64              # Batch size for training
-train_samples = 100000        # Number of training samples
+train_samples = 25000        # Number of training samples
 val_samples = 2000           # Number of validation samples
 
 # ============================================================
 # Inference Parameters
 # ============================================================
-method = 'direct_solve'      # Steady-state solver: 'direct_solve', 'matrix_tree', or 'linear_solver'
+method = 'newton'            # Steady-state solver: 'newton', 'direct_solve', 'matrix_tree', 'linear_solver'
 temperature = 1.0            # Softmax temperature for attention
 
-
-# Set parameters
+# ============================================================
+# Combined Parameter Dictionary
+# ============================================================
 params = {
     # Data generation
     'K': K,
@@ -102,14 +112,21 @@ params = {
     # Model architecture
     'n_nodes': n_nodes,
     'transform_func': transform_func,
-    'learn_base_rates': learn_base_rates,
-    
+    'learn_base_rates_W': learn_base_rates_W,
+    'learn_base_rates_Y': learn_base_rates_Y,
+    'symmetrize_Y': symmetrize_Y,
+            
     # Sparsity - K_params
-    'sparsity_rho_edge': sparsity_rho_edge,
-    'sparsity_rho_all': sparsity_rho_all,
+    'sparsity_rho_edge_K': sparsity_rho_edge_K,
+    'sparsity_rho_all_K': sparsity_rho_all_K,
+    
+    # Sparsity - L_params
+    'sparsity_rho_edge_L': sparsity_rho_edge_L,
+    'sparsity_rho_all_L': sparsity_rho_all_L,
     
     # Sparsity - Base rates
     'sparsity_rho_edge_base_W': sparsity_rho_edge_base_W,
+    'sparsity_rho_edge_base_Y': sparsity_rho_edge_base_Y,
     'base_mask_value': base_mask_value,
     
     # Training
@@ -162,13 +179,18 @@ val_loader = DataLoader(ICLGMMDataset(val_data), batch_size=params['batch_size']
 
 # Create model
 print("\nCreating model...")
-model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
+model = NonlinearMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
                            L=params['L'], N=params['N'], 
-                           learn_base_rates=params['learn_base_rates'], 
+                           learn_base_rates_W=params['learn_base_rates_W'],
+                           learn_base_rates_Y=params['learn_base_rates_Y'], 
+                           symmetrize_Y=params['symmetrize_Y'],
                            transform_func=params['transform_func'],
-                           sparsity_rho_edge=params['sparsity_rho_edge'], 
-                           sparsity_rho_all=params['sparsity_rho_all'],
+                           sparsity_rho_edge_K=params['sparsity_rho_edge_K'], 
+                           sparsity_rho_all_K=params['sparsity_rho_all_K'],
+                           sparsity_rho_edge_L=params['sparsity_rho_edge_L'], 
+                           sparsity_rho_all_L=params['sparsity_rho_all_L'],
                            sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
+                           sparsity_rho_edge_base_Y=params['sparsity_rho_edge_base_Y'],
                            base_mask_value=params['base_mask_value'])
 
 # Train with ICL/IWL tracking
