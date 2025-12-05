@@ -17,10 +17,16 @@ Naming convention:
 - W, Y: computed rate matrix/tensor from K, L and context
 """
 
+
 import torch
 import torch.nn as nn
 import numpy as np
 from .base_icl_model import BaseICLModel
+
+MIN_W = -15
+MAX_W = 15
+MIN_Y = -50
+MAX_Y = np.log(0.1)
 
 
 class NonlinearMarkovICL(BaseICLModel):
@@ -39,7 +45,7 @@ class NonlinearMarkovICL(BaseICLModel):
                  sparsity_rho_edge_K=1.0, sparsity_rho_all_K=1.0,
                  sparsity_rho_edge_L=1.0, sparsity_rho_all_L=1.0,
                  sparsity_rho_edge_base_W=1.0, sparsity_rho_edge_base_Y=1.0,
-                 base_mask_value=0.0, symmetrize_Y=True):
+                 base_mask_value=0.0, symmetrize_Y=True, print_creation = True):
         """
         Initialize Nonlinear Markov ICL model.
         
@@ -109,7 +115,7 @@ class NonlinearMarkovICL(BaseICLModel):
         self.base_log_rates_W = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base_K)
         
         # Set fixed seed for sparsity mask generation (ensures reproducibility across models)
-        torch.manual_seed(42)
+        # torch.manual_seed(42)
         
         # Create sparsity masks for K_params and base_W
         self._create_linear_sparsity_masks(z_full_dim)
@@ -153,28 +159,29 @@ class NonlinearMarkovICL(BaseICLModel):
                 lambda grad: grad * self.base_log_rates_Y_mask
             )
         
-        print(f"  Initialized Nonlinear Markov ICL model (L={L} classes, "
-              f"attention over {N} context items)")
-        print(f"  Nonlinear dynamics: W p + p Y p = 0")
-        print(f"  Symmetrize Y tensor: {symmetrize_Y} (Y_ijk = Y_ikj)")
-        print(f"  Label modulation: {self.use_label_mod}")
-        print(f"  Base rates learnable W: {learn_base_rates_W}, Y: {learn_base_rates_Y}")
-        print(f"  Base mask value: {base_mask_value}")
-        print(f"  Sparsity K: rho_edge={sparsity_rho_edge_K:.3f}, rho_all={sparsity_rho_all_K:.3f}")
-        print(f"  Sparsity L: rho_edge={sparsity_rho_edge_L:.3f}, rho_all={sparsity_rho_all_L:.3f}")
-        print(f"  Sparsity base_W: rho_edge={sparsity_rho_edge_base_W:.3f}")
-        print(f"  Sparsity base_Y: rho_edge={sparsity_rho_edge_base_Y:.3f}")
-        sparsity_stats = self.get_sparsity_stats()
-        if sparsity_stats:
-            print(f"  K_params sparsity: {sparsity_stats['K_actual_sparsity']:.3f} "
-                  f"({sparsity_stats['K_num_active']}/{sparsity_stats['K_num_total']} active)")
-            print(f"  L_params sparsity: {sparsity_stats['L_actual_sparsity']:.3f} "
-                  f"({sparsity_stats['L_num_active']}/{sparsity_stats['L_num_total']} active)")
-            print(f"  base_W sparsity: {sparsity_stats['base_W_actual_sparsity']:.3f} "
-                  f"({sparsity_stats['base_W_num_active']}/{sparsity_stats['base_W_num_total']} active)")
-            print(f"  base_Y sparsity: {sparsity_stats['base_Y_actual_sparsity']:.3f} "
-                  f"({sparsity_stats['base_Y_num_active']}/{sparsity_stats['base_Y_num_total']} active)")
-        print(f"  Parameters: {self.get_num_parameters():,}")
+        if print_creation:
+            print(f"  Initialized Nonlinear Markov ICL model (L={L} classes, "
+                f"attention over {N} context items)")
+            print(f"  Nonlinear dynamics: W p + p Y p = 0")
+            print(f"  Symmetrize Y tensor: {symmetrize_Y} (Y_ijk = Y_ikj)")
+            print(f"  Label modulation: {self.use_label_mod}")
+            print(f"  Base rates learnable W: {learn_base_rates_W}, Y: {learn_base_rates_Y}")
+            print(f"  Base mask value: {base_mask_value}")
+            print(f"  Sparsity K: rho_edge={sparsity_rho_edge_K:.3f}, rho_all={sparsity_rho_all_K:.3f}")
+            print(f"  Sparsity L: rho_edge={sparsity_rho_edge_L:.3f}, rho_all={sparsity_rho_all_L:.3f}")
+            print(f"  Sparsity base_W: rho_edge={sparsity_rho_edge_base_W:.3f}")
+            print(f"  Sparsity base_Y: rho_edge={sparsity_rho_edge_base_Y:.3f}")
+            sparsity_stats = self.get_sparsity_stats()
+            if sparsity_stats:
+                print(f"  K_params sparsity: {sparsity_stats['K_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['K_num_active']}/{sparsity_stats['K_num_total']} active)")
+                print(f"  L_params sparsity: {sparsity_stats['L_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['L_num_active']}/{sparsity_stats['L_num_total']} active)")
+                print(f"  base_W sparsity: {sparsity_stats['base_W_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['base_W_num_active']}/{sparsity_stats['base_W_num_total']} active)")
+                print(f"  base_Y sparsity: {sparsity_stats['base_Y_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['base_Y_num_active']}/{sparsity_stats['base_Y_num_total']} active)")
+            print(f"  Parameters: {self.get_num_parameters():,}")
     
     def _create_linear_sparsity_masks(self, z_full_dim):
         """
@@ -341,7 +348,7 @@ class NonlinearMarkovICL(BaseICLModel):
         log_rates = base_expanded + rate_mod
         
         # Clamp for numerical stability
-        log_rates = torch.clamp(log_rates, min=-50.0, max=15.0)
+        log_rates = torch.clamp(log_rates, min=MIN_W, max=MAX_W)
         
         # Apply transformation to get rates
         if self.transform_func == 'exp':
@@ -408,7 +415,7 @@ class NonlinearMarkovICL(BaseICLModel):
         
         # Clamp for numerical stability
         #log_rates = torch.clamp(log_rates, min=-2.0, max=0.0)
-        log_rates = torch.clamp(log_rates, min=-50.0, max=-2.0)
+        log_rates = torch.clamp(log_rates, min=MIN_Y, max=MAX_Y)
         
         # Apply transformation to get rates
         if self.transform_func == 'exp':
@@ -591,7 +598,7 @@ class NonlinearMarkovICL(BaseICLModel):
         
     #     return p_batch
 
-    def newton_steady_state(self, W_batch, Y_batch, n_iter=10, eps=1e-12, tol=1e-8):
+    def newton_steady_state(self, W_batch, Y_batch, n_iter=30, eps=1e-12, tol=1e-6):
         """
         Newton's method for solving W p + p Y p = 0.
         
@@ -641,11 +648,345 @@ class NonlinearMarkovICL(BaseICLModel):
             p_new = p_new / p_new.sum(dim=1, keepdim=True)
             
             p_batch = p_new
+        # Handle NaN/Inf (fallback to uniform)                                                                               
+        mask = torch.isnan(p_batch).any(dim=1) | torch.isinf(p_batch).any(dim=1)
+        if mask.any():
+            print("Resorting from nan")
+            p_batch[mask] = 1.0 / n
+            
+        # Verify steady state quality
+        with torch.no_grad():
+            outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+            Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+            L = torch.einsum("bij,bj->bi", W_batch, p_batch)
+            F_final = L + Q
+            max_drift = torch.abs(F_final).max().item()
+            
+
+            if max_drift > 1e-2:
+                print(f"WARNING: Newton steady state did not converge properly!")
+                print(f"  Max drift: {max_drift:.2e} (threshold: 1e-2)")
+                print(f"  Iterations: {n_iter}")
         
         return p_batch
-    
+
+    # def newton_steady_state(self, W_batch, Y_batch, n_iter=50, eps=1e-12, tol=1e-10):
+    #     """
+    #     Newton's method for solving W p + p Y p = 0.
+        
+    #     Much faster convergence (typically 5-10 iterations vs 50+)
+    #     """
+    #     batch_size, n = W_batch.shape[0], self.n_nodes
+    #     device = W_batch.device
+        
+    #     # Initialize from uniform distribution
+    #     p_batch = torch.full((batch_size, n), 1.0/n, device=device)
+        
+    #     for iter_num in range(n_iter):
+    #         # Compute F(p) = W p + p Y p
+    #         outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+    #         Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+    #         L = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+    #         F = L + Q
+            
+    #         # Check convergence
+    #         if torch.abs(F).max() < tol:
+    #             break
+            
+    #         # Compute Jacobian
+    #         Y_p_contract = torch.einsum("bijk,bk->bij", Y_batch, p_batch)
+    #         Y_p_contract_T = torch.einsum("bijk,bj->bik", Y_batch, p_batch)
+    #         J = W_batch + Y_p_contract + Y_p_contract_T
+
+    #         # REGULARIZE FIRST for numerical stability
+    #         J = J + 1e-6 * torch.eye(n, device=device).unsqueeze(0)
+
+    #         # THEN add constraint: last row enforces sum(p) = 1
+    #         J_constrained = J.clone()
+    #         J_constrained[:, -1, :] = 1.0
+            
+    #         # RHS
+    #         b = -F
+    #         b[:, -1] = 1.0 - p_batch.sum(dim=1)
+            
+    #         # Solve with error handling
+    #         try:
+    #             delta_p = torch.linalg.solve(J_constrained, b)
+    #         except RuntimeError:
+    #             # If solve fails, use pseudo-inverse (still differentiable)
+    #             delta_p = torch.linalg.lstsq(J_constrained, b).solution
+            
+    #         # PROPER LINE SEARCH: Backtracking to ensure valid probability distribution
+    #         alpha = 1.0
+    #         for _ in range(10):  # Max 10 backtracking steps
+    #             p_new = p_batch + alpha * delta_p
+    #             p_new = torch.clamp(p_new, min=eps)
+    #             p_new = p_new / p_new.sum(dim=1, keepdim=True)
+                
+    #             # Check if result is valid (no NaN/Inf)
+    #             if not (torch.isnan(p_new).any() or torch.isinf(p_new).any()):
+    #                 break
+    #             alpha *= 0.5
+    #         else:
+    #             # If all line search steps failed, use smaller step
+    #             p_new = p_batch + 0.01 * delta_p
+    #             p_new = torch.clamp(p_new, min=eps)
+    #             p_new = p_new / p_new.sum(dim=1, keepdim=True)
+            
+    #         p_batch = p_new
+        
+    #     # Last resort: Use torch.where for differentiable fallback
+    #     # This maintains gradient flow unlike masking
+    #     mask = (torch.isnan(p_batch) | torch.isinf(p_batch)).any(dim=1, keepdim=True)
+    #     uniform = torch.full_like(p_batch, 1.0/n)
+    #     p_batch = torch.where(mask, uniform, p_batch)
+        
+    #     if mask.any():
+    #         print(f"WARNING: {mask.sum().item()} samples fell back to uniform distribution")
+        
+    #     # Verify steady state quality
+    #     with torch.no_grad():
+    #         outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+    #         Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+    #         L = torch.einsum("bij,bj->bi", W_batch, p_batch)
+    #         F_final = L + Q
+    #         max_drift = torch.abs(F_final).max().item()
+            
+    #         if max_drift > 1e-3:
+    #             print(f"WARNING: Newton steady state did not converge properly!")
+    #             print(f"  Max drift: {max_drift:.2e} (threshold: 1e-3)")
+    #             print(f"  Iterations: {iter_num+1}/{n_iter}")
+        
+    #     return p_batch
+
+    def fixed_point_steady_state(self, W_batch, Y_batch, n_iter=50, eps=1e-12, tol=1e-8, step_size=0.05):
+        """
+        Fixed-point iteration for solving W p + p Y p = 0.
+        
+        Uses gradient descent with simplex projection.
+        """
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
+        
+        # Initialize from uniform distribution
+        p_batch = torch.full((batch_size, n), 1.0/n, device=device)
+        
+        for _ in range(n_iter):
+            # Compute F(p) = W p + p Y p
+            outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+            Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+            L = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+            F = L + Q
+            
+            # Check convergence
+            if torch.abs(F).max() < tol:
+                break
+            
+            # Gradient descent step toward F(p) = 0
+            p_batch = p_batch + step_size * F
+            
+            # Project onto probability simplex
+            p_batch = torch.clamp(p_batch, min=eps)
+            p_batch = p_batch / p_batch.sum(dim=1, keepdim=True)
+        
+        # Handle NaN/Inf (fallback to uniform)
+        mask = torch.isnan(p_batch).any(dim=1) | torch.isinf(p_batch).any(dim=1)
+        if mask.any():
+            p_batch[mask] = 1.0 / n
+        
+        # Verify steady state quality
+        with torch.no_grad():
+            outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+            Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+            L = torch.einsum("bij,bj->bi", W_batch, p_batch)
+            F_final = L + Q
+            max_drift = torch.abs(F_final).max().item()
+            
+
+            if max_drift > 1e-3:
+                print(f"WARNING: Newton steady state did not converge properly!")
+                print(f"  Max drift: {max_drift:.2e} (threshold: 1e-3)")
+                print(f"  Iterations: {n_iter}")
+        
+        return p_batch
+
+
+    def sqp_steady_state(self, W_batch, Y_batch, n_iter=20, eps=1e-12, tol=1e-10):
+        """
+        Sequential Quadratic Programming - handles constraints naturally.
+        More robust than projection-based methods.
+        """
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
+        
+        # Initialize
+        p_batch = torch.full((batch_size, n), 1.0/n, device=device)
+        
+        for iteration in range(n_iter):
+            # Compute F(p) = W p + p Y p
+            outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+            Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+            L = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+            F = L + Q
+            
+            # Check convergence
+            max_drift = torch.abs(F).max().item()
+            if max_drift < tol:
+                break
+            
+            # Compute Jacobian
+            Y_p_contract = torch.einsum("bijk,bk->bij", Y_batch, p_batch)
+            Y_p_contract_T = torch.einsum("bijk,bj->bik", Y_batch, p_batch)
+            J = W_batch + Y_p_contract + Y_p_contract_T
+            
+            # Solve constrained QP: min ||J*dp + F||^2 s.t. sum(dp)=0, p+dp>=0
+            # Simplified: use projected Newton with trust region
+            
+            # Try to solve J * dp = -F with constraint sum(dp) = 0
+            J_aug = torch.cat([J, torch.ones(batch_size, 1, n, device=device)], dim=1)
+            F_aug = torch.cat([F, torch.zeros(batch_size, 1, device=device)], dim=1)
+            
+            try:
+                # Least squares solve
+                dp = torch.linalg.lstsq(J_aug, -F_aug).solution
+            except:
+                # Fallback to gradient descent
+                dp = -0.1 * F
+            
+            # Line search with trust region
+            alpha = 1.0
+            for _ in range(10):
+                p_new = p_batch + alpha * dp
+                
+                # Project to simplex
+                p_new = torch.clamp(p_new, min=eps)
+                p_new = p_new / p_new.sum(dim=1, keepdim=True)
+                
+                # Check if improvement
+                outer_new = p_new.unsqueeze(2) * p_new.unsqueeze(1)
+                Q_new = torch.einsum("bijk,bjk->bi", Y_batch, outer_new)
+                L_new = torch.bmm(W_batch, p_new.unsqueeze(-1)).squeeze(-1)
+                F_new = L_new + Q_new
+                
+                if (F_new ** 2).sum() < (F ** 2).sum():
+                    break
+                alpha *= 0.5
+            
+            p_batch = p_new
+        
+        with torch.no_grad():
+            if max_drift > 1e-3:
+                print(f"WARNING: SQP did not converge! Max drift: {max_drift:.2e}")
+        
+        return p_batch
+
+    def newton_steady_state_log_param(self, W_batch, Y_batch, n_iter=100, tol=1e-10):
+        """
+        Newton's method for solving W p + p Y p = 0 using log parameterization.
+        
+        Uses p = softmax(u) to automatically satisfy constraints p >= 0, sum(p) = 1.
+        This avoids the need for clamping and projection.
+        
+        Args:
+            self: Model with n_nodes attribute
+            W_batch: (batch_size, n_nodes, n_nodes) - linear rate matrix
+            Y_batch: (batch_size, n_nodes, n_nodes, n_nodes) - nonlinear rate tensor
+            n_iter: Number of Newton iterations (default: 20)
+            tol: Convergence tolerance (default: 1e-6)
+            
+        Returns:
+            p_batch: (batch_size, n_nodes) - steady state distributions
+        """
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
+        
+        # Initialize u such that p = softmax(u) = uniform
+        # For uniform: u = zeros works
+        u_batch = torch.zeros((batch_size, n), device=device)
+        
+        for iter_idx in range(n_iter):
+            # Compute p = softmax(u)
+            p_batch = torch.softmax(u_batch, dim=1)
+            
+            # Compute F(p) = W p + p Y p
+            outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+            Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+            L = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+            F = L + Q
+            
+            # Check convergence
+            max_drift = torch.abs(F).max().item()
+            if max_drift < tol:
+                break
+            
+            # Compute Jacobian in p-space: J_p[i,j] = dF_i/dp_j
+            Y_p_contract = torch.einsum("bijk,bk->bij", Y_batch, p_batch)
+            Y_p_contract_T = torch.einsum("bijk,bj->bik", Y_batch, p_batch)
+            J_p = W_batch + Y_p_contract + Y_p_contract_T  # (batch, n, n)
+            
+            # Transform to u-space using chain rule: dF/du = dF/dp * dp/du
+            # For p = softmax(u): dp_i/du_j = p_i * (δ_ij - p_j)
+            # This gives: J_u = J_p @ diag(p) @ (I - p p^T)
+            
+            # More efficient computation:
+            # J_u = diag(p) @ J_p^T @ (I - p p^T)
+            # For solving: J_u @ delta_u = -F
+            # We need: (I - p p^T) @ diag(p) @ J_p^T @ delta_u = -F
+            
+            # Actually, let's use: J_u[i,j] = sum_k J_p[i,k] * p_k * (δ_kj - p_j)
+            #                              = J_p[i,j] * p_j - (J_p @ p)_i * p_j
+            # In matrix form: J_u = diag(J_p @ p) @ p^T + diag(p) @ J_p^T - p @ p^T @ diag(p) @ J_p^T
+            
+            # Simpler: J_u = J_p @ (diag(p) - p @ p^T)
+            # where (diag(p) - p @ p^T) is the Jacobian of softmax
+            
+            p_diag = torch.diag_embed(p_batch)  # (batch, n, n)
+            pp_outer = p_batch.unsqueeze(-1) @ p_batch.unsqueeze(-2)  # (batch, n, n)
+            softmax_jac = p_diag - pp_outer  # (batch, n, n)
+            
+            J_u = torch.bmm(J_p, softmax_jac)  # (batch, n, n)
+            
+            # The system is singular (sum of columns = 0 due to softmax structure)
+            # We need to add a constraint. Use: last row = e^T (sum constraint)
+            J_u_constrained = J_u.clone()
+            J_u_constrained[:, -1, :] = 1.0
+            
+            # RHS: we want F(p) = 0, but also maintain sum(p) = 1
+            b = -F
+            b[:, -1] = 0.0  # Sum constraint already satisfied by softmax
+            
+            # Solve for delta_u
+            try:
+                delta_u = torch.linalg.solve(J_u_constrained, b)
+            except:
+                # If singular, fall back to gradient descent in u-space
+                # Gradient is: grad_u F = softmax_jac^T @ grad_p F = softmax_jac^T @ F
+                grad_u = torch.bmm(softmax_jac.transpose(1, 2), F.unsqueeze(-1)).squeeze(-1)
+                delta_u = -0.1 * grad_u
+            
+            # Update (no need for line search usually, softmax handles constraints)
+            u_batch = u_batch + delta_u
+        
+        # Final p from softmax
+        p_batch = torch.softmax(u_batch, dim=1)
+        
+        # Verify convergence
+        with torch.no_grad():
+            outer = p_batch.unsqueeze(2) * p_batch.unsqueeze(1)
+            Q = torch.einsum("bijk,bjk->bi", Y_batch, outer)
+            L = torch.einsum("bij,bj->bi", W_batch, p_batch)
+            F_final = L + Q
+            max_drift = torch.abs(F_final).max().item()
+            
+            if max_drift > 1e-3:
+                print(f"WARNING: Log-param Newton did not converge properly!")
+                print(f"  Max drift: {max_drift:.2e} (threshold: 1e-3)")
+                print(f"  Iterations: {iter_idx + 1}/{n_iter}")
+        
+        return p_batch
+
     def forward(self, z_seq_batch, labels_seq_batch, method='newton', temperature=1.0, 
-                n_iter=50, step_size=0.1):
+                n_iter=200, step_size=0.1):
         """
         Forward pass with attention over context items.
         
@@ -659,10 +1000,10 @@ class NonlinearMarkovICL(BaseICLModel):
         Args:
             z_seq_batch: (batch_size, N+1, z_dim)
             labels_seq_batch: (batch_size, N) - context labels (1 to L)
-            method: str - method for computing steady state (currently only 'direct_solve' supported)
+            method: str - method for computing steady state ('newton', 'fixed_point', 'direct_solve')
             temperature: float - softmax temperature (default 1.0)
             n_iter: int - number of iterations for steady state solver (default 50)
-            step_size: float - step size for gradient descent in solver (default 0.1)
+            step_size: float - step size for gradient descent in direct_solve/fixed_point (default 0.1)
             
         Returns:
             logits: (batch_size, L) - class logits (log-probabilities)
@@ -677,13 +1018,20 @@ class NonlinearMarkovICL(BaseICLModel):
         W_batch = self.compute_rate_matrix_W(z_flat)
         Y_batch = self.compute_rate_tensor_Y(z_flat)
         
-        # Compute steady state (currently only direct_solve is implemented for nonlinear case)
+        # Compute steady state
         if method == 'newton':
-            p_batch = self.newton_steady_state(W_batch, Y_batch, n_iter=30)
+            p_batch = self.newton_steady_state(W_batch, Y_batch)#, n_iter=n_iter)
+        elif method == 'lbfgs':
+            p_batch = self.lbfgs_steady_state_no_grad(W_batch, Y_batch, max_iter=100)
+        elif method == 'sqp':
+            p_batch = self.sqp_steady_state(W_batch, Y_batch)#, n_iter=n_iter)
+            #p_batch = self.fixed_point_steady_state_anderson(W_batch, Y_batch, n_iter=n_iter, step_size=step_size)
+            #p_batch = self.fixed_point_steady_state(W_batch, Y_batch, n_iter=n_iter, step_size=step_size)
+      
         elif method == 'direct_solve':
             p_batch = self.direct_solve_steady_state(W_batch, Y_batch, n_iter=n_iter, step_size=step_size)
         else:
-            raise ValueError(f"Method '{method}' not supported for nonlinear model. Use 'direct_solve'.")
+            raise ValueError(f"Method '{method}' not supported. Use 'newton', 'fixed_point', or 'direct_solve'.")
         
         # Compute context position scores: q_m = Σ_k B_{k,m} * π_k
         q = torch.matmul(p_batch, self.B)  # (batch_size, N)
@@ -829,4 +1177,67 @@ class NonlinearMarkovICL(BaseICLModel):
         active_indices = torch.nonzero(triplet_active, as_tuple=False)
         
         return [(i.item(), j.item(), k.item()) for i, j, k in active_indices]
+
+    def get_non_zero_count_L(self):
+        L_array = np.array(self.L_params.detach().numpy() * self.L_params_mask.detach().numpy())
+        s = L_array.shape
+        non_zero_count = 0
+        for i in range(s[0]):
+            for j in range(s[1]):
+                if i != j: 
+                    for k in range(j):
+                        l_vec = L_array[i,j,k,:] + L_array[i,k,j,:] # symmetrize
+                        for element in l_vec:
+                            if np.abs(element) > 1e-10:
+                                non_zero_count += 1
+        return non_zero_count
+
+    def get_non_zero_count_K(self):
+        K_array = np.array(self.K_params.detach().numpy() * self.K_params_mask.detach().numpy())
+        s = K_array.shape
+        non_zero_count = 0
+        for i in range(s[0]):
+            for j in range(s[1]):
+                if i != j: 
+                    k_vec = K_array[i,j,:]
+                    for element in k_vec:
+                        if np.abs(element) > 1e-10:
+                            non_zero_count += 1
+        return non_zero_count
+
+
+def load_model_nlm(params, path, print_creation = True):
+    """Load a NonlinearMarkovICL model from saved weights.
+    
+    Args:
+        params: Dictionary containing model parameters
+        path: Path to directory containing model.pt file
+        
+    Returns:
+        model: Loaded model in evaluation mode on appropriate device
+    """
+    model = NonlinearMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
+                               L=params['L'], N=params['N'], 
+                               learn_base_rates_W=params['learn_base_rates_W'],
+                               learn_base_rates_Y=params['learn_base_rates_Y'], 
+                               symmetrize_Y=params['symmetrize_Y'],
+                               transform_func=params['transform_func'],
+                               sparsity_rho_edge_K=params['sparsity_rho_edge_K'], 
+                               sparsity_rho_all_K=params['sparsity_rho_all_K'],
+                               sparsity_rho_edge_L=params['sparsity_rho_edge_L'], 
+                               sparsity_rho_all_L=params['sparsity_rho_all_L'],
+                               sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
+                               sparsity_rho_edge_base_Y=params['sparsity_rho_edge_base_Y'],
+                               base_mask_value=params['base_mask_value'],
+                               print_creation=print_creation)
+    
+    model_path = path + 'model.pt'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    
+    model.to(device)
+    model.eval()
+    
+    return model
 

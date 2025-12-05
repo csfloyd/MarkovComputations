@@ -36,7 +36,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
     def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False, 
                  learn_base_rates=True, transform_func='exp', 
                  sparsity_rho_edge=1.0, sparsity_rho_all=1.0,
-                 sparsity_rho_edge_base_W=1.0, base_mask_value=0.0):
+                 sparsity_rho_edge_base_W=1.0, base_mask_value=0.0, print_creation = True):
         """
         Initialize Markov ICL model.
         
@@ -105,20 +105,21 @@ class MatrixTreeMarkovICL(BaseICLModel):
                 lambda grad: grad * self.base_log_rates_W_mask
             )
         
-        print(f"  Initialized ICL Attention model (L={L} classes, "
-              f"attention over {N} context items)")
-        print(f"  Label modulation: {self.use_label_mod}")
-        print(f"  Base rates learnable: {learn_base_rates}")
-        print(f"  Base mask value: {base_mask_value}")
-        print(f"  Sparsity K: rho_edge={sparsity_rho_edge:.3f}, rho_all={sparsity_rho_all:.3f}")
-        print(f"  Sparsity base_W: rho_edge={sparsity_rho_edge_base_W:.3f}")
-        sparsity_stats = self.get_sparsity_stats()
-        if sparsity_stats:
-            print(f"  K_params sparsity: {sparsity_stats['K_actual_sparsity']:.3f} "
-                  f"({sparsity_stats['K_num_active']}/{sparsity_stats['K_num_total']} active)")
-            print(f"  base_W sparsity: {sparsity_stats['base_W_actual_sparsity']:.3f} "
-                  f"({sparsity_stats['base_W_num_active']}/{sparsity_stats['base_W_num_total']} active)")
-        print(f"  Parameters: {self.get_num_parameters():,}")
+        if print_creation:
+            print(f"  Initialized ICL Attention model (L={L} classes, "
+                f"attention over {N} context items)")
+            print(f"  Label modulation: {self.use_label_mod}")
+            print(f"  Base rates learnable: {learn_base_rates}")
+            print(f"  Base mask value: {base_mask_value}")
+            print(f"  Sparsity K: rho_edge={sparsity_rho_edge:.3f}, rho_all={sparsity_rho_all:.3f}")
+            print(f"  Sparsity base_W: rho_edge={sparsity_rho_edge_base_W:.3f}")
+            sparsity_stats = self.get_sparsity_stats()
+            if sparsity_stats:
+                print(f"  K_params sparsity: {sparsity_stats['K_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['K_num_active']}/{sparsity_stats['K_num_total']} active)")
+                print(f"  base_W sparsity: {sparsity_stats['base_W_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['base_W_num_active']}/{sparsity_stats['base_W_num_total']} active)")
+            print(f"  Parameters: {self.get_num_parameters():,}")
     
     def _create_sparsity_masks(self, z_full_dim):
         """
@@ -577,3 +578,46 @@ class MatrixTreeMarkovICL(BaseICLModel):
         
         return [(i.item(), j.item()) for i, j in active_indices]
 
+    def get_non_zero_count_K(self):
+        K_array = np.array(self.K_params.detach().numpy() * self.K_params_mask.detach().numpy())
+        s = K_array.shape
+        non_zero_count = 0
+        for i in range(s[0]):
+            for j in range(s[1]):
+                if i != j: 
+                    k_vec = K_array[i,j,:]
+                    for element in k_vec:
+                        if np.abs(element) > 1e-10:
+                            non_zero_count += 1
+        return non_zero_count
+
+
+def load_model(params, path, print_creation = True):
+    """Load a MarkovICL model from saved weights.
+    
+    Args:
+        params: Dictionary containing model parameters
+        path: Path to directory containing model.pt file
+        
+    Returns:
+        model: Loaded model in evaluation mode on appropriate device
+    """
+    model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
+                               L=params['L'], N=params['N'], 
+                               learn_base_rates=params['learn_base_rates'],
+                               transform_func=params['transform_func'],
+                               sparsity_rho_edge=params['sparsity_rho_edge'], 
+                               sparsity_rho_all=params['sparsity_rho_all'],
+                               sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
+                               base_mask_value=params['base_mask_value'],
+                               print_creation=print_creation)
+    
+    model_path = path + 'model.pt'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    
+    model.to(device)
+    model.eval()
+    
+    return model
