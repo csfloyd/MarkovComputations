@@ -1,15 +1,19 @@
 """
 Markov ICL Model using Matrix Tree Theorem.
 
-This implementation uses a rate matrix K where:
-- K_ij ≥ 0 for i ≠ j (transition rates from state j to state i)
-- Columns sum to zero: Σᵢ K_ij = 0
-- Steady state satisfies: K p = 0
+This implementation uses a rate matrix W computed from parameters K where:
+- W_ij ≥ 0 for i ≠ j (transition rates from state j to state i)
+- Columns sum to zero: Σᵢ W_ij = 0
+- Steady state satisfies: W p = 0
 
 The Matrix Tree Theorem gives:
-    p_i = det(K^(i)) / Σⱼ det(K^(j))
+    p_i = det(W^(i)) / Σⱼ det(W^(j))
     
-where K^(i) is obtained by deleting row i and column i from K.
+where W^(i) is obtained by deleting row i and column i from W.
+
+Naming convention:
+- K: learnable parameters (K_params) that map context to rate matrix W
+- W: computed rate matrix from K and context
 """
 
 import torch
@@ -20,18 +24,19 @@ from .base_icl_model import BaseICLModel
 
 class MatrixTreeMarkovICL(BaseICLModel):
     """
-    Matrix Tree Theorem implementation using rate matrix K with CLASSIFICATION output.
+    Matrix Tree Theorem implementation using rate matrix W with CLASSIFICATION output.
     
     Architecture:
-    1. Compute context-dependent rate matrix K
-    2. Solve for steady state distribution π
+    1. Compute context-dependent rate matrix W (from parameters K)
+    2. Solve for steady state distribution π: W p = 0
     3. Map π to attention over context positions
     4. Aggregate attention by label to get class logits
     """
     
     def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False, 
                  learn_base_rates=True, transform_func='exp', 
-                 sparsity_rho_edge=1.0, sparsity_rho_all=1.0):
+                 sparsity_rho_edge=1.0, sparsity_rho_all=1.0,
+                 sparsity_rho_edge_base_W=1.0, base_mask_value=0.0, print_creation = True):
         """
         Initialize Markov ICL model.
         
@@ -41,10 +46,12 @@ class MatrixTreeMarkovICL(BaseICLModel):
             L: Number of output classes
             N: Number of context examples
             use_label_mod: Whether to modulate rates by context labels
-            learn_base_rates: Whether to allow gradient updates to base_log_rates
+            learn_base_rates: Whether to allow gradient updates to unmasked base rates
             transform_func: Transformation function for rates ('exp', 'relu', 'elu')
             sparsity_rho_edge: Fraction of non-zero elements in per-edge mask (n_nodes x n_nodes)
             sparsity_rho_all: Fraction of non-zero elements in per-element mask (all dims)
+            sparsity_rho_edge_base_W: Fraction of (i,j) edges with base rates in W
+            base_mask_value: Value for masked base rates (0.0 or float('-inf'))
         """
         super().__init__(n_nodes=n_nodes, z_dim=z_dim, L=L, N=N)
         self.n_nodes = n_nodes
@@ -52,6 +59,9 @@ class MatrixTreeMarkovICL(BaseICLModel):
         self.transform_func = transform_func
         self.sparsity_rho_edge = sparsity_rho_edge
         self.sparsity_rho_all = sparsity_rho_all
+        self.sparsity_rho_edge_base_W = sparsity_rho_edge_base_W
+        self.base_mask_value = base_mask_value
+        self.learn_base_rates = learn_base_rates
         
         z_full_dim = (N + 1) * z_dim  # Flatten all context + query
         l_full_dim = N
@@ -75,36 +85,54 @@ class MatrixTreeMarkovICL(BaseICLModel):
         # B maps steady state to context position scores (attention mechanism)
         self.B = nn.Parameter(torch.randn(n_nodes, N) * init_scale_B)
         
-        # Base log rates
-        if learn_base_rates:
-            self.base_log_rates = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base)
-        else:
-            self.base_log_rates = nn.Parameter(torch.zeros(n_nodes, n_nodes))
+        # Base log rates for W
+        # Note: To get zero base rates, set sparsity_rho_edge_base_W = 0.0 with base_mask_value = 0.0
+        self.base_log_rates_W = nn.Parameter(torch.randn(n_nodes, n_nodes) * 0.1 + init_base)
         
-        # Optionally freeze base_log_rates
-        if not learn_base_rates:
-            self.base_log_rates.requires_grad = False
+        # Set fixed seed for sparsity mask generation (ensures reproducibility across models)
+        torch.manual_seed(42)
         
-        # Create sparsity masks for K_params
+        # Create sparsity masks for K_params and base rates
         self._create_sparsity_masks(z_full_dim)
         
-        print(f"  Initialized ICL Attention model (L={L} classes, "
-              f"attention over {N} context items)")
-        print(f"  Label modulation: {self.use_label_mod}")
-        print(f"  Base rates learnable: {learn_base_rates}")
-        print(f"  Sparsity: rho_edge={sparsity_rho_edge:.3f}, rho_all={sparsity_rho_all:.3f}")
-        sparsity_stats = self.get_sparsity_stats()
-        if sparsity_stats:
-            print(f"  K_params sparsity: {sparsity_stats['actual_sparsity']:.3f} "
-                  f"({sparsity_stats['num_active_params']}/{sparsity_stats['num_total_params']} active)")
-        print(f"  Parameters: {self.get_num_parameters():,}")
+        # Set up gradient masking for base rates if learn_base_rates is False
+        # or if we want to only learn unmasked base rates
+        if not learn_base_rates:
+            self.base_log_rates_W.requires_grad = False
+        else:
+            # Register hooks to zero out gradients for masked base rates
+            self.base_log_rates_W.register_hook(
+                lambda grad: grad * self.base_log_rates_W_mask
+            )
+        
+        if print_creation:
+            print(f"  Initialized ICL Attention model (L={L} classes, "
+                f"attention over {N} context items)")
+            print(f"  Label modulation: {self.use_label_mod}")
+            print(f"  Base rates learnable: {learn_base_rates}")
+            print(f"  Base mask value: {base_mask_value}")
+            print(f"  Sparsity K: rho_edge={sparsity_rho_edge:.3f}, rho_all={sparsity_rho_all:.3f}")
+            print(f"  Sparsity base_W: rho_edge={sparsity_rho_edge_base_W:.3f}")
+            sparsity_stats = self.get_sparsity_stats()
+            if sparsity_stats:
+                print(f"  K_params sparsity: {sparsity_stats['K_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['K_num_active']}/{sparsity_stats['K_num_total']} active)")
+                print(f"  base_W sparsity: {sparsity_stats['base_W_actual_sparsity']:.3f} "
+                    f"({sparsity_stats['base_W_num_active']}/{sparsity_stats['base_W_num_total']} active)")
+            print(f"  Parameters: {self.get_num_parameters():,}")
     
     def _create_sparsity_masks(self, z_full_dim):
         """
-        Create sparsity masks for K_params using two-level masking.
+        Create sparsity masks for K_params and base rates using two-level masking.
         
-        Per-edge mask: (n_nodes, n_nodes, 1) - controls which (i,j) edges exist
-        Per-element mask: (n_nodes, n_nodes, z_full_dim) - controls sparsity within each edge
+        For K_params (n_nodes, n_nodes, z_full_dim):
+            - Per-edge mask: (n_nodes, n_nodes, 1) - controls which (i,j) edges exist
+            - Per-element mask: (n_nodes, n_nodes, z_full_dim) - controls sparsity within each edge
+        
+        For base_log_rates_W (n_nodes, n_nodes):
+            - Per-edge mask: (n_nodes, n_nodes) - controls which (i,j) edges have base rates
+            - IMPORTANT: Automatically set to 1 (enabled) for any edge where K_params is active
+              This ensures edges with learnable K parameters aren't permanently disabled by -inf base rates
         
         Final mask is element-wise product: only survives if both masks are 1.
         
@@ -136,20 +164,37 @@ class MatrixTreeMarkovICL(BaseICLModel):
         
         # Register as buffer (moves with model to device, not trained)
         self.register_buffer('K_params_mask', combined_mask)
-    
-    def compute_rate_matrix_K(self, z_batch, labels_batch=None):
-        """
-        Compute the rate matrix K where columns sum to zero.
         
-        K[i,j] = exp(base[i,j] + K_params[i,j] · z + label_mod[i,j] · labels) for i≠j
-        K[j,j] = -Σ_{k≠j} K[k,j]
+        # ==================== base_log_rates_W mask ====================
+        if self.sparsity_rho_edge_base_W < 1.0:
+            # Generate uniform [0,1] samples and keep if < rho_edge_base_W
+            edge_mask_samples_W = torch.rand(n, n)
+            base_mask_W = (edge_mask_samples_W < self.sparsity_rho_edge_base_W).float()
+        else:
+            base_mask_W = torch.ones(n, n)
+        
+        # IMPORTANT: Override base mask for edges where K_params is active
+        # If K_params has active parameters for edge (i,j), force base_W mask to 1
+        # This ensures -inf base rates don't permanently disable edges that can be learned via K
+        k_edge_active = (combined_mask.sum(dim=2) > 0).float()  # (n, n) - 1 if any K param is active
+        base_mask_W = torch.maximum(base_mask_W, k_edge_active)
+        
+        # Register as buffer
+        self.register_buffer('base_log_rates_W_mask', base_mask_W)
+    
+    def compute_rate_matrix_W(self, z_batch, labels_batch=None):
+        """
+        Compute the rate matrix W from parameters K where columns sum to zero.
+        
+        W[i,j] = exp(base[i,j] + K_params[i,j] · z + label_mod[i,j] · labels) for i≠j
+        W[j,j] = -Σ_{k≠j} W[k,j]
         
         Args:
             z_batch: (batch_size, z_full_dim) - flattened input features
             labels_batch: (batch_size, N) - optional context labels for rate modulation
             
         Returns:
-            K_batch: (batch_size, n_nodes, n_nodes) with columns summing to zero
+            W_batch: (batch_size, n_nodes, n_nodes) - computed rate matrix with columns summing to zero
         """
         batch_size = z_batch.shape[0]
         n = self.n_nodes
@@ -167,54 +212,62 @@ class MatrixTreeMarkovICL(BaseICLModel):
             label_mod = torch.einsum('bijd,bd->bij', label_expanded, labels_batch)
             rate_mod = rate_mod + label_mod
         
-        # Add base rates
-        base_expanded = self.base_log_rates.unsqueeze(0).expand(batch_size, -1, -1)
+        # Add base rates with masking
+        # Apply mask: set masked elements to base_mask_value (0.0 or -inf)
+        base_masked = torch.where(
+            self.base_log_rates_W_mask.bool(),
+            self.base_log_rates_W,
+            torch.full_like(self.base_log_rates_W, self.base_mask_value)
+        )
+        base_expanded = base_masked.unsqueeze(0).expand(batch_size, -1, -1)
         log_rates = base_expanded + rate_mod
         
         # Clamp for numerical stability
-        log_rates = torch.clamp(log_rates, min=-15.0, max=15.0)
+        #log_rates = torch.clamp(log_rates, min=np.exp(np.log(1e-6)), max=np.exp(np.log(1e6)))
+        log_rates = torch.clamp(log_rates, min=-15, max=15)
         
-        # Exponentiate to get rates
+        # Apply transformation to get rates
         if self.transform_func == 'exp':
             rates = torch.exp(log_rates)
         elif self.transform_func == 'relu':
             rates = torch.relu(log_rates) + 1e-10
+        elif self.transform_func == 'softplus':
+            rates = torch.nn.functional.softplus(log_rates) + 1e-10
         elif self.transform_func == 'elu':
-            rates = torch.nn.functional.elu(log_rates) # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.elu_.html
+            rates = torch.nn.functional.elu(log_rates) + 1e-10
         else:
             raise ValueError(f"Invalid transform function: {self.transform_func}")
-
         
         # Zero out diagonal (we'll set it later)
         eye = torch.eye(n, device=rates.device).unsqueeze(0)
         rates = rates * (1 - eye)
         
-        # Construct K with proper diagonal so columns sum to zero
-        # K[j,j] = -Σ_{k≠j} K[k,j]
+        # Construct W with proper diagonal so columns sum to zero
+        # W[j,j] = -Σ_{k≠j} W[k,j]
         col_sums = rates.sum(dim=1)  # Sum over rows
-        K_batch = rates - torch.diag_embed(col_sums)
+        W_batch = rates - torch.diag_embed(col_sums)
         
-        return K_batch
+        return W_batch
     
-    def matrix_tree_steady_state(self, K_batch):
+    def matrix_tree_steady_state(self, W_batch):
         """
         Compute steady state using Matrix Tree Theorem.
         
-        For rate matrix K with columns summing to zero,
-        the steady state p satisfying K p = 0 is given by:
+        For rate matrix W with columns summing to zero,
+        the steady state p satisfying W p = 0 is given by:
         
-            p_i = det(K^(i)) / Σⱼ det(K^(j))
+            p_i = det(W^(i)) / Σⱼ det(W^(j))
         
-        where K^(i) is K with row i and column i deleted.
+        where W^(i) is W with row i and column i deleted.
         
         Args:
-            K_batch: (batch_size, n_nodes, n_nodes)
+            W_batch: (batch_size, n_nodes, n_nodes) - rate matrix
             
         Returns:
             p_batch: (batch_size, n_nodes) - steady state distributions
         """
-        batch_size, n = K_batch.shape[0], self.n_nodes
-        device = K_batch.device
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
         
         # Compute determinants of all minors
         p_batch = torch.zeros(batch_size, n, device=device)
@@ -222,10 +275,10 @@ class MatrixTreeMarkovICL(BaseICLModel):
         for i in range(n):
             # Delete row i and column i
             indices = [j for j in range(n) if j != i]
-            K_minor = K_batch[:, indices, :][:, :, indices]
+            W_minor = W_batch[:, indices, :][:, :, indices]
             
             # Compute determinant
-            det = torch.det(K_minor)
+            det = torch.det(W_minor)
             det = torch.abs(det)  # Handle numerical sign issues
             det = torch.clamp(det, min=1e-10, max=1e10)
             
@@ -243,28 +296,28 @@ class MatrixTreeMarkovICL(BaseICLModel):
         
         return p_batch
     
-    def linear_solver_steady_state(self, K_batch):
+    def linear_solver_steady_state(self, W_batch):
         """
         Compute steady state using linear solver (more efficient than Matrix Tree).
         
         Solves the augmented system:
-            [K      ]     [0]
+            [W      ]     [0]
             [1,1,...] p = [1]
         
-        Where K p = 0 (steady state) and sum(p) = 1 (normalization).
+        Where W p = 0 (steady state) and sum(p) = 1 (normalization).
         
         Args:
-            K_batch: (batch_size, n_nodes, n_nodes)
+            W_batch: (batch_size, n_nodes, n_nodes) - rate matrix
             
         Returns:
             p_batch: (batch_size, n_nodes)
         """
-        batch_size, n = K_batch.shape[0], self.n_nodes
-        device = K_batch.device
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
         
         # Augment system
         ones_row = torch.ones(batch_size, 1, n, device=device)
-        A_augmented = torch.cat([K_batch, ones_row], dim=1)
+        A_augmented = torch.cat([W_batch, ones_row], dim=1)
         
         # Target
         b = torch.zeros(batch_size, n + 1, device=device)
@@ -291,33 +344,114 @@ class MatrixTreeMarkovICL(BaseICLModel):
         
         return p_batch
     
-    def direct_solve_steady_state(self, K_batch):
+    def direct_solve_steady_state(self, W_batch):
         """
-        Replace last row of K with normalization constraint and solve directly.
+        Replace last row of W with normalization constraint and solve directly.
+        Falls back to normal equations with regularization if direct solve fails.
         
         Args:
-            K_batch: (batch_size, n_nodes, n_nodes)
+            W_batch: (batch_size, n_nodes, n_nodes) - rate matrix
             
         Returns:
             p_batch: (batch_size, n_nodes)
         """
-        batch_size, n = K_batch.shape[0], self.n_nodes
-        device = K_batch.device
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
         
-        # Modify K: replace last row with [1, 1, 1, ..., 1]
-        K_modified = K_batch.clone()
-        K_modified[:, -1, :] = 1.0
+        # Modify W: replace last row with [1, 1, 1, ..., 1]
+        W_modified = W_batch.clone()
+        W_modified[:, -1, :] = 1.0
         
         # RHS: [0, 0, ..., 0, 1]
         b = torch.zeros(batch_size, n, device=device)
         b[:, -1] = 1.0
         
-        # Solve K_modified @ p = b
-        p_batch = torch.linalg.solve(K_modified, b)
+        # Try direct solve first (faster, exact)
+        # try:
+        p_batch = torch.linalg.solve(W_modified, b)
+        # except RuntimeError:
+        #     # Fallback: normal equations with regularization (handles singular matrices)
+        #     WtW = torch.bmm(W_modified.transpose(1, 2), W_modified)
+        #     WtW = WtW + 1e-4 * torch.eye(n, device=device).unsqueeze(0)
+        #     Wtb = torch.bmm(W_modified.transpose(1, 2), b.unsqueeze(-1))
+        #     p_batch = torch.linalg.solve(WtW, Wtb).squeeze(-1)
         
         # Ensure non-negativity and normalization
         p_batch = torch.clamp(p_batch, min=0.0)
         p_batch = p_batch / p_batch.sum(dim=1, keepdim=True)
+        
+        return p_batch
+    
+    def newton_steady_state(self, W_batch, n_iter=10, eps=1e-12, tol=1e-8):
+        """
+        Newton's method for solving W p = 0 with sum(p) = 1.
+        
+        For the linear steady state problem, this iteratively refines the solution
+        using Newton's method with the constraint that probabilities sum to 1.
+        
+        Args:
+            W_batch: (batch_size, n_nodes, n_nodes) - rate matrix
+            n_iter: Number of Newton iterations (default: 10)
+            eps: Minimum value for clamping probabilities (default: 1e-12)
+            tol: Convergence tolerance for ||W p|| (default: 1e-8)
+            
+        Returns:
+            p_batch: (batch_size, n_nodes) - steady state distributions
+        """
+        batch_size, n = W_batch.shape[0], self.n_nodes
+        device = W_batch.device
+        
+        # Initialize from uniform distribution
+        p_batch = torch.full((batch_size, n), 1.0/n, device=device)
+        
+        for iteration in range(n_iter):
+            # Compute F(p) = W p
+            F = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)  # (batch_size, n)
+            
+            # Check convergence
+            F_norm = torch.abs(F).max()
+            if F_norm < tol:
+                break
+            
+            # For linear case, Jacobian J = W
+            # We modify the system to enforce sum(p) = 1 by replacing last row
+            J_constrained = W_batch.clone()
+            J_constrained[:, -1, :] = 1.0
+            
+            # RHS: -F with constraint correction
+            b = -F
+            b[:, -1] = 1.0 - p_batch.sum(dim=1)  # Enforce sum constraint
+            
+            # Solve J * delta_p = b for the Newton step
+            try:
+                delta_p = torch.linalg.solve(J_constrained, b)
+            except RuntimeError:
+                # Fallback: add regularization if singular
+                J_reg = J_constrained + 1e-6 * torch.eye(n, device=device).unsqueeze(0)
+                delta_p = torch.linalg.solve(J_reg, b)
+            
+            # Update with full Newton step
+            p_batch = p_batch + delta_p
+            
+            # Project onto probability simplex: clamp and normalize
+            p_batch = torch.clamp(p_batch, min=eps)
+            p_batch = p_batch / p_batch.sum(dim=1, keepdim=True)
+        
+        # Handle NaN/Inf (fallback to uniform)
+        mask = torch.isnan(p_batch).any(dim=1) | torch.isinf(p_batch).any(dim=1)
+        if mask.any():
+            p_batch[mask] = 1.0 / n
+        
+        # Verify steady state quality
+        with torch.no_grad():
+            F_final = torch.bmm(W_batch, p_batch.unsqueeze(-1)).squeeze(-1)
+            max_drift = torch.abs(F_final).max().item()
+            
+            max_drift_tol = 1e-3
+            if max_drift > max_drift_tol:
+                print("WARNING: Newton steady state did not converge properly!")
+                print(f"  Max drift: {max_drift:.2e} (threshold: {max_drift_tol:.2e})")
+                print(f"  Iterations: {iteration + 1}/{n_iter}")
         
         return p_batch
     
@@ -326,16 +460,17 @@ class MatrixTreeMarkovICL(BaseICLModel):
         Forward pass with attention over context items.
         
         Architecture:
-        1. Steady state π from Markov chain
-        2. Context position scores: q_m = Σ_k B_{k,m} * π_k
-        3. Attention: softmax(q / temperature)
-        4. Class logits: sum attention weights by context label
+        1. Compute rate matrix W from parameters K
+        2. Solve for steady state π: W p = 0
+        3. Context position scores: q_m = Σ_k B_{k,m} * π_k
+        4. Attention: softmax(q / temperature)
+        5. Class logits: sum attention weights by context label
         
         Args:
             z_seq_batch: (batch_size, N+1, z_dim)
             labels_seq_batch: (batch_size, N) - context labels (1 to L)
             method: str - method for computing steady state
-                'matrix_tree', 'linear_solver', or 'direct_solve'
+                'matrix_tree', 'linear_solver', 'direct_solve', or 'newton'
             temperature: float - softmax temperature (default 1.0)
             
         Returns:
@@ -347,16 +482,18 @@ class MatrixTreeMarkovICL(BaseICLModel):
         # Flatten z sequences
         z_flat = z_seq_batch.reshape(batch_size, -1)
         
-        # Compute rate matrix K
-        K_batch = self.compute_rate_matrix_K(z_flat)
+        # Compute rate matrix W from parameters K
+        W_batch = self.compute_rate_matrix_W(z_flat)
         
         # Compute steady state
         if method == 'matrix_tree':
-            p_batch = self.matrix_tree_steady_state(K_batch)
+            p_batch = self.matrix_tree_steady_state(W_batch)
         elif method == 'linear_solver':
-            p_batch = self.linear_solver_steady_state(K_batch)
+            p_batch = self.linear_solver_steady_state(W_batch)
         elif method == 'direct_solve':
-            p_batch = self.direct_solve_steady_state(K_batch)
+            p_batch = self.direct_solve_steady_state(W_batch)
+        elif method == 'newton':
+            p_batch = self.newton_steady_state(W_batch, n_iter = 30)
         else:
             raise ValueError(f"Invalid method: {method}")
         
@@ -385,35 +522,55 @@ class MatrixTreeMarkovICL(BaseICLModel):
     
     def get_sparsity_stats(self):
         """
-        Get statistics about K_params sparsity.
+        Get statistics about K_params and base rate sparsity.
         
         Returns:
-            dict with sparsity information, or None if no sparsity mask exists
+            dict with sparsity information for K and base_W, or None if no masks exist
         """
         if not hasattr(self, 'K_params_mask'):
             return None
         
-        mask = self.K_params_mask
-        num_total = mask.numel()
-        num_active = mask.sum().item()
-        actual_sparsity = 1.0 - (num_active / num_total)
+        # K_params stats
+        mask_K = self.K_params_mask
+        num_total_K = mask_K.numel()
+        num_active_K = mask_K.sum().item()
+        actual_sparsity_K = 1.0 - (num_active_K / num_total_K)
+        
+        # base_log_rates_W stats
+        mask_base_W = self.base_log_rates_W_mask
+        num_total_base_W = mask_base_W.numel()
+        num_active_base_W = mask_base_W.sum().item()
+        actual_sparsity_base_W = 1.0 - (num_active_base_W / num_total_base_W)
         
         return {
             'rho_edge': self.sparsity_rho_edge,
             'rho_all': self.sparsity_rho_all,
-            'actual_sparsity': actual_sparsity,
-            'num_active_params': int(num_active),
-            'num_total_params': num_total,
-            'fraction_active': num_active / num_total
+            'rho_edge_base_W': self.sparsity_rho_edge_base_W,
+            'K_actual_sparsity': actual_sparsity_K,
+            'K_num_active': int(num_active_K),
+            'K_num_total': num_total_K,
+            'K_fraction_active': num_active_K / num_total_K,
+            'base_W_actual_sparsity': actual_sparsity_base_W,
+            'base_W_num_active': int(num_active_base_W),
+            'base_W_num_total': num_total_base_W,
+            'base_W_fraction_active': num_active_base_W / num_total_base_W
         }
     
     def resample_sparsity_mask(self):
         """
-        Re-randomize the sparsity mask with same rho values.
+        Re-randomize the sparsity masks with same rho values.
         Useful for experiments testing different random masks.
+        Resamples masks for K_params and base_log_rates_W.
         """
         z_full_dim = self.K_params.shape[2]
         self._create_sparsity_masks(z_full_dim)
+        
+        # Re-register gradient hooks for base rates if learn_base_rates is True
+        if self.learn_base_rates:
+            # Remove old hooks (they're automatically replaced when re-registering)
+            self.base_log_rates_W.register_hook(
+                lambda grad: grad * self.base_log_rates_W_mask
+            )
     
     def get_active_edges(self):
         """
@@ -432,3 +589,46 @@ class MatrixTreeMarkovICL(BaseICLModel):
         
         return [(i.item(), j.item()) for i, j in active_indices]
 
+    def get_non_zero_count_K(self):
+        K_array = np.array(self.K_params.detach().numpy() * self.K_params_mask.detach().numpy())
+        s = K_array.shape
+        non_zero_count = 0
+        for i in range(s[0]):
+            for j in range(s[1]):
+                if i != j: 
+                    k_vec = K_array[i,j,:]
+                    for element in k_vec:
+                        if np.abs(element) > 1e-10:
+                            non_zero_count += 1
+        return non_zero_count
+
+
+def load_model(params, path, print_creation = True):
+    """Load a MarkovICL model from saved weights.
+    
+    Args:
+        params: Dictionary containing model parameters
+        path: Path to directory containing model.pt file
+        
+    Returns:
+        model: Loaded model in evaluation mode on appropriate device
+    """
+    model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
+                               L=params['L'], N=params['N'], 
+                               learn_base_rates=params['learn_base_rates'],
+                               transform_func=params['transform_func'],
+                               sparsity_rho_edge=params['sparsity_rho_edge'], 
+                               sparsity_rho_all=params['sparsity_rho_all'],
+                               sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
+                               base_mask_value=params['base_mask_value'],
+                               print_creation=print_creation)
+    
+    model_path = path + 'model.pt'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    
+    model.to(device)
+    model.eval()
+    
+    return model

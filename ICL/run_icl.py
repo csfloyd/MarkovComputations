@@ -32,61 +32,98 @@ args = parser.parse_args()
 
 output_dir = args.output
 
+# ============================================================
+# Data Generation Parameters
+# ============================================================
+L = 256                      # Number of output classes
+K = 256                      # Number of GMM classes for data generation
+D = 1                        # Dimension of input features
+N = 8                        # Number of context examples per task
+B = 1                        # Burstiness parameter (zipfian sampling weight)
+epsilon = 1e-3               # Within-class noise (standard deviation)
+seed = 20                    # Random seed for reproducibility
+exact_copy = True            # If True, query is exact copy of a context item
+shuffle_context = True       # Whether to shuffle context order during training
+offset = 0.0                 # Offset applied to GMM centers
+min_max_choice = None        # Optional constraint on min/max class indices
+unique_labels = False        # If True, ensure all context labels are unique
 
-#### discrete test
-# Pre-define all parameters
-L = 64
-K = args.param2
-#K = 1024
-#D = 2
-D = args.param1
-N = 8
-#N = args.param1
-B = 1
-#n_nodes = args.param2
-n_nodes = 8
-epochs = 1000
-lr = 0.0025
-batch_size = 64
-#train_samples = 200000
-#val_samples = 4000
-train_samples = 100000
-val_samples = 2000
-epsilon = 1e-3
-seed = 22
-exact_copy = True
-method = 'direct_solve'
-temperature = 1.0
-shuffle_context = True
-learn_base_rates = False
-offset = 0.0
-min_max_choice = None
-unique_labels = False
+# ============================================================
+# Model Architecture Parameters
+# ============================================================
+n_nodes = 8                  # Number of nodes in the Markov chain
+transform_func = 'exp'       # Transformation function: 'exp', 'relu', or 'elu'
+learn_base_rates = False     # If True, allow gradient updates to unmasked base rates
+
+# ============================================================
+# Sparsity Parameters - K_params (context-dependent modulation)
+# ============================================================
+sparsity_rho_edge = 1.0      # Fraction of (i,j) edges with K parameters
+sparsity_rho_all = 1.0       # Fraction of individual K parameters to keep
+
+# ============================================================
+# Sparsity Parameters - Base Rates
+# ============================================================
+sparsity_rho_edge_base_W = 1.0   # Fraction of (i,j) edges with base rates in W
+base_mask_value = float('-inf')            # Value for masked base rates: 0.0 (no bias) or float('-inf') (disable edge)
+
+# ============================================================
+# Training Parameters
+# ============================================================
+epochs = 100                  # Number of training epochs
+lr = 0.0025                  # Learning rate
+batch_size = 64              # Batch size for training
+train_samples = 100000        # Number of training samples
+val_samples = 2000           # Number of validation samples
+
+# ============================================================
+# Inference Parameters
+# ============================================================
+method = 'direct_solve'      # Steady-state solver: 'direct_solve', 'matrix_tree', or 'linear_solver'
+temperature = 1.0            # Softmax temperature for attention
+
 
 # Set parameters
 params = {
-    'K': K,                      # Number of GMM classes
-    'L': L,                      # Number of output classes (can be different from K)
-    'D': D,                      # Dimension
-    'N': N,                      # Context examples
-    'B': B,                      # Burstiness
-    'n_nodes': n_nodes,          # Markov nodes
-    'epochs': epochs,            # Training epochs
-    'lr': lr,                    # Learning rate
+    # Data generation
+    'K': K,
+    'L': L,
+    'D': D,
+    'N': N,
+    'B': B,
+    'epsilon': epsilon,
+    'seed': seed,
+    'exact_copy': exact_copy,
+    'shuffle_context': shuffle_context,
+    'offset': offset,
+    'min_max_choice': min_max_choice,
+    'unique_labels': unique_labels,
+    
+    # Model architecture
+    'n_nodes': n_nodes,
+    'transform_func': transform_func,
+    'learn_base_rates': learn_base_rates,
+    
+    # Sparsity - K_params
+    'sparsity_rho_edge': sparsity_rho_edge,
+    'sparsity_rho_all': sparsity_rho_all,
+    
+    # Sparsity - Base rates
+    'sparsity_rho_edge_base_W': sparsity_rho_edge_base_W,
+    'base_mask_value': base_mask_value,
+    
+    # Training
+    'epochs': epochs,
+    'lr': lr,
     'batch_size': batch_size,
     'train_samples': train_samples,
     'val_samples': val_samples,
-    'epsilon': epsilon,          # Within-class noise
-    'seed': seed,
-    'exact_copy': exact_copy,    # Query is exact copy of context item
+    
+    # Inference
     'method': method,
-    'temperature': temperature,   # Softmax temperature
-    'shuffle_context': shuffle_context,
-    'learn_base_rates': learn_base_rates,
-    'offset': offset,
-    'min_max_choice': min_max_choice,
-    'unique_labels' : unique_labels
+    'temperature': temperature
 }
+
 
 print("="*70)
 print("MARKOV ICL - CLASSIFICATION (Softmax Output)")
@@ -126,7 +163,13 @@ val_loader = DataLoader(ICLGMMDataset(val_data), batch_size=params['batch_size']
 # Create model
 print("\nCreating model...")
 model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
-                           L=params['L'], N=params['N'], learn_base_rates=params['learn_base_rates'])
+                           L=params['L'], N=params['N'], 
+                           learn_base_rates=params['learn_base_rates'], 
+                           transform_func=params['transform_func'],
+                           sparsity_rho_edge=params['sparsity_rho_edge'], 
+                           sparsity_rho_all=params['sparsity_rho_all'],
+                           sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
+                           base_mask_value=params['base_mask_value'])
 
 # Train with ICL/IWL tracking
 start_time = time.time()
@@ -147,7 +190,6 @@ results = test_icl(model, gmm, params['N'], device, n_samples=1000,
                   exact_copy=params['exact_copy'], B=params['B'], 
                   method=params['method'], L=params['L'],
                   temperature=params['temperature'], shuffle_context=params['shuffle_context'], min_max_choice=params['min_max_choice'], unique_labels = params['unique_labels'])
-
 
 # Save results
 os.makedirs(output_dir, exist_ok=True)
