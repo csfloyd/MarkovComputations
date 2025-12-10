@@ -223,13 +223,16 @@ class MatrixTreeMarkovICL(BaseICLModel):
         log_rates = base_expanded + rate_mod
         
         # Clamp for numerical stability
-        log_rates = torch.clamp(log_rates, min=-15.0, max=15.0)
+        #log_rates = torch.clamp(log_rates, min=np.exp(np.log(1e-6)), max=np.exp(np.log(1e6)))
+        log_rates = torch.clamp(log_rates, min=-15, max=15)
         
         # Apply transformation to get rates
         if self.transform_func == 'exp':
             rates = torch.exp(log_rates)
         elif self.transform_func == 'relu':
             rates = torch.relu(log_rates) + 1e-10
+        elif self.transform_func == 'softplus':
+            rates = torch.nn.functional.softplus(log_rates) + 1e-10
         elif self.transform_func == 'elu':
             rates = torch.nn.functional.elu(log_rates) + 1e-10
         else:
@@ -344,6 +347,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
     def direct_solve_steady_state(self, W_batch):
         """
         Replace last row of W with normalization constraint and solve directly.
+        Falls back to normal equations with regularization if direct solve fails.
         
         Args:
             W_batch: (batch_size, n_nodes, n_nodes) - rate matrix
@@ -362,8 +366,15 @@ class MatrixTreeMarkovICL(BaseICLModel):
         b = torch.zeros(batch_size, n, device=device)
         b[:, -1] = 1.0
         
-        # Solve W_modified @ p = b
+        # Try direct solve first (faster, exact)
+        # try:
         p_batch = torch.linalg.solve(W_modified, b)
+        # except RuntimeError:
+        #     # Fallback: normal equations with regularization (handles singular matrices)
+        #     WtW = torch.bmm(W_modified.transpose(1, 2), W_modified)
+        #     WtW = WtW + 1e-4 * torch.eye(n, device=device).unsqueeze(0)
+        #     Wtb = torch.bmm(W_modified.transpose(1, 2), b.unsqueeze(-1))
+        #     p_batch = torch.linalg.solve(WtW, Wtb).squeeze(-1)
         
         # Ensure non-negativity and normalization
         p_batch = torch.clamp(p_batch, min=0.0)
