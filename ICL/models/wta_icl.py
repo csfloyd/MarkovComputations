@@ -33,7 +33,7 @@ class WinnerTakesAllICL(BaseICLModel):
     """
     
     def __init__(self, n_nodes=10, z_dim=2, L=75, N=4, use_label_mod=False,
-                 alpha=1.0, K_scale=1.0, R0=2.0, activation='softplus'):
+                 alpha=1.0, K_scale=1.0, R0=2.0, activation='softplus', beta_softplus=10.0):
         """
         Initialize WTA Chemical Reaction ICL model.
         
@@ -54,6 +54,8 @@ class WinnerTakesAllICL(BaseICLModel):
         self.alpha = alpha
         self.R0 = R0
         self.activation = activation
+        self.beta_softplus = beta_softplus
+        self.leaky_relu = nn.LeakyReLU()
         
         z_full_dim = (N + 1) * z_dim  # Flatten all context + query
         l_full_dim = N
@@ -68,16 +70,19 @@ class WinnerTakesAllICL(BaseICLModel):
         
         # w_0j: Bias terms for reaction rates
         # Shape: (n_nodes,)
-        self.w0 = nn.Parameter(torch.zeros(n_nodes))
-        
+        #self.w0 = nn.Parameter(torch.ones(n_nodes))
+        self.w0 = torch.zeros(n_nodes)
+
         # K_j: Carrying capacity parameters (positive)
         # Shape: (n_nodes,)
-        self.log_K = nn.Parameter(torch.ones(n_nodes) * np.log(K_scale))
-        
+        self.log_K = nn.Parameter(torch.ones(n_nodes)) # * torch.log(K_scale))
+        #self.log_K = torch.ones(n_nodes) #* 4.0
+ 
         # β_j: Competition/death rate parameters (positive)
         # Shape: (n_nodes,)
-        self.log_beta = nn.Parameter(torch.zeros(n_nodes))
-        
+        self.log_beta = nn.Parameter(torch.ones(n_nodes))
+        #self.log_beta = torch.ones(n_nodes) #* 4.0
+
         # Optional: modulate rates by context labels
         if self.use_label_mod:
             self.label_modulation = nn.Parameter(
@@ -130,7 +135,8 @@ class WinnerTakesAllICL(BaseICLModel):
         
         # Apply ReLU (max with 0) and scale
         # f_j = α/K_j * max(linear_comb, 0)
-        f_batch = self.alpha * torch.relu(linear_comb) / K
+        # f_batch = self.alpha * torch.relu(linear_comb) / K
+        f_batch = self.alpha * torch.nn.functional.softplus(inside_term, beta=self.beta_softplus) / K
         
         # Ensure numerical stability
         f_batch = torch.clamp(f_batch, min=1e-10, max=1e10)
@@ -170,13 +176,14 @@ class WinnerTakesAllICL(BaseICLModel):
             inside_term = self.R0 * f_batch[b, j_star] / beta_batch[b, j_star] - 1
             
             # ReLU ensures non-negative concentration
-            Y_value = K_batch[b, j_star] * torch.relu(inside_term)
-            
+            #Y_value = K_batch[b, j_star] * torch.relu(inside_term)
+            Y_value = K_batch[b, j_star] * self.leaky_relu(inside_term)
+
             Y_batch[b, j_star] = Y_value
         
         return Y_batch
     
-    def winner_takes_all_softplus(self, f_batch, K_batch, beta_batch, tau=0.1, beta_softplus=5.0):
+    def winner_takes_all_softplus(self, f_batch, K_batch, beta_batch, tau=0.01):
         """
         Alternative soft WTA using softplus for smoother gradients.
         
@@ -202,14 +209,14 @@ class WinnerTakesAllICL(BaseICLModel):
         # Compute Y values using softplus instead of ReLU
         # This ensures smooth gradients and strict positivity
         inside_term = self.R0 * f_batch / beta_batch - 1
-        Y_potential = K_batch * torch.nn.functional.softplus(inside_term, beta=beta_softplus)
+        Y_potential = K_batch * torch.nn.functional.softplus(inside_term, beta=self.beta_softplus)
         
         # Weight by softmin
         Y_batch = weights * Y_potential
         
         return Y_batch
     
-    def winner_takes_all_soft(self, f_batch, K_batch, beta_batch, tau=0.1):
+    def winner_takes_all_soft(self, f_batch, K_batch, beta_batch, tau=0.01):
         """
         Soft approximation of WTA using softmin for differentiability.
         
@@ -252,7 +259,7 @@ class WinnerTakesAllICL(BaseICLModel):
         
         return Y_batch
     
-    def forward(self, z_seq_batch, labels_seq_batch, method=None, temperature=1.0, wta_tau=0.1):
+    def forward(self, z_seq_batch, labels_seq_batch, method=None, temperature=1.0, wta_tau=0.01):
         """
         Forward pass with WTA chemical reaction dynamics.
         
@@ -287,6 +294,8 @@ class WinnerTakesAllICL(BaseICLModel):
             # During training: use soft WTA for differentiability
             if self.activation == 'softplus':
                 Y_batch = self.winner_takes_all_softplus(f_batch, K_batch, beta_batch, tau=wta_tau)
+            elif self.activation == 'relu':
+                Y_batch = self.winner_takes_all_dynamics(f_batch, K_batch, beta_batch)
             else:  # default to 'relu'
                 Y_batch = self.winner_takes_all_soft(f_batch, K_batch, beta_batch, tau=wta_tau)
         else:
@@ -294,6 +303,8 @@ class WinnerTakesAllICL(BaseICLModel):
             #Y_batch = self.winner_takes_all_dynamics(f_batch, K_batch, beta_batch)
             if self.activation == 'softplus':
                 Y_batch = self.winner_takes_all_softplus(f_batch, K_batch, beta_batch, tau=wta_tau)
+            elif self.activation == 'relu':
+                Y_batch = self.winner_takes_all_dynamics(f_batch, K_batch, beta_batch)
             else:  # default to 'relu'
                 Y_batch = self.winner_takes_all_soft(f_batch, K_batch, beta_batch, tau=wta_tau)
 
@@ -302,12 +313,13 @@ class WinnerTakesAllICL(BaseICLModel):
         Y_batch = torch.clamp(Y_batch, min=0.0)
         
         # Normalize Y (interpret as distribution over species)
-        Y_sum = Y_batch.sum(dim=1, keepdim=True)
-        Y_norm = Y_batch / (Y_sum + 1e-8)
+        #Y_sum = Y_batch.sum(dim=1, keepdim=True)
+        #Y_norm = Y_batch / (Y_sum + 1e-8)
         
         # Compute context position scores: q_m = Σ_j B_{j,m} * Y_j
-        q = torch.matmul(Y_norm, self.B)  # (batch_size, N)
-        
+        #q = torch.matmul(Y_norm, self.B)  # (batch_size, N)
+        q = torch.matmul(Y_batch, self.B)  # (batch_size, N)
+
         # Apply temperature and softmax to get attention over context positions
         attention = torch.softmax(q / temperature, dim=1)  # (batch_size, N)
         
