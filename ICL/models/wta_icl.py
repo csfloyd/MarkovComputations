@@ -136,7 +136,7 @@ class WinnerTakesAllICL(BaseICLModel):
         # Apply ReLU (max with 0) and scale
         # f_j = α/K_j * max(linear_comb, 0)
         # f_batch = self.alpha * torch.relu(linear_comb) / K
-        f_batch = self.alpha * torch.nn.functional.softplus(inside_term, beta=self.beta_softplus) / K
+        f_batch = self.alpha * torch.nn.functional.softplus(linear_comb, beta=self.beta_softplus) / K
         
         # Ensure numerical stability
         f_batch = torch.clamp(f_batch, min=1e-10, max=1e10)
