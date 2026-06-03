@@ -40,40 +40,44 @@ output_dir = args.output
 L = 128                      # Number of output classes
 K = L                      # Number of GMM classes for data generation
 D = 4                        # Dimension of input features
-N = 4                        # Number of context examples per task
+N = args.param2               # Number of context examples per task
 B = 1                        # Burstiness parameter (zipfian sampling weight)
 epsilon = 1e-3               # Within-class noise (standard deviation)
-seed = args.param2                     # Random seed for reproducibility
+seed = args.param3           # Random seed for reproducibility
 exact_copy = True            # If True, query is exact copy of a context item
 shuffle_context = True       # Whether to shuffle context order during training
 offset = 0.0                 # Offset applied to GMM centers
 min_max_choice = None        # Optional constraint on min/max class indices
 unique_labels = False        # If True, ensure all context labels are unique
+equal_norm = False           # If True, normalize all GMM class means to equal norm
 
 # ============================================================
 # Input Projection Parameters
 # ============================================================
-input_proj_mode = "random"   # "identity" or "random"
-input_proj_scale = 10.0
-input_proj_dim = args.param1
+input_proj_mode = "identity"   # "identity" or "random"
+input_proj_scale = 1
+input_proj_dim = D
 
 # ============================================================
 # Model Architecture Parameters
 # ============================================================
-n_nodes = 5                  # Number of nodes in the Markov chain
+n_nodes = args.param1                  # Number of nodes in the Markov chain
 transform_func = 'exp'       # Transformation function: 'exp', 'relu', or 'elu'
 learn_base_rates = True      # If True, allow gradient updates to unmasked base rates
 
-context_scorer_type = "linear"  # 'linear' or 'mlp' scorer head
-mlp_depth = 2    # MLP depth for scorer head (if enabled)
-mlp_width = 64    # MLP width for scorer head (if enabled)
+rate_encoder_type = "mlp"  # 'linear' (K·z) or 'mlp' (z → n_nodes² log-rate shift)
+encoder_mlp_depth = 2
+encoder_mlp_width = 32
+rate_decoder_type = "mlp"  # 'linear' (π @ B) or 'mlp' decoder head
+decoder_mlp_depth = 2
+decoder_mlp_width = 32
 
-add_qk = True
+add_qk = False
 qk_dim = input_proj_dim       # Key/query latent dimension for QK baseline
 
-add_mlp = True
+add_mlp = False
 mlp_baseline_depth = 2
-mlp_baseline_width = 64
+mlp_baseline_width = 32
 mlp_baseline_dropout = 0.0
 mlp_baseline_activation = "relu"
 
@@ -121,6 +125,7 @@ params = {
     'offset': offset,
     'min_max_choice': min_max_choice,
     'unique_labels': unique_labels,
+    'equal_norm': equal_norm,
     
     # Model architecture
     'n_nodes': n_nodes,
@@ -128,9 +133,12 @@ params = {
     'add_mlp': add_mlp,
     'transform_func': transform_func,
     'learn_base_rates': learn_base_rates,
-    'context_scorer_type': context_scorer_type,
-    'mlp_depth': mlp_depth,
-    'mlp_width': mlp_width,
+    'rate_encoder_type': rate_encoder_type,
+    'encoder_mlp_depth': encoder_mlp_depth,
+    'encoder_mlp_width': encoder_mlp_width,
+    'rate_decoder_type': rate_decoder_type,
+    'decoder_mlp_depth': decoder_mlp_depth,
+    'decoder_mlp_width': decoder_mlp_width,
     'qk_dim': qk_dim,
     'mlp_baseline_depth': mlp_baseline_depth,
     'mlp_baseline_width': mlp_baseline_width,
@@ -167,9 +175,17 @@ print("="*70)
 print("MARKOV ICL - CLASSIFICATION (Softmax Output)")
 print("="*70)
 print(f"K={params['K']}, D={params['D']}, N={params['N']}, B={params['B']}, nodes={params['n_nodes']}")
+print(f"Data options: equal_norm={params['equal_norm']}, epsilon={params['epsilon']}")
 print(f"Baselines enabled: add_qk={params['add_qk']}, add_mlp={params['add_mlp']}")
 print(f"Method: {params['method']}, Temperature: {params['temperature']}")
-print(f"Context scorer: {params['context_scorer_type']} (mlp_depth={params['mlp_depth']}, mlp_width={params['mlp_width']})")
+print(
+    f"Rate encoder: {params['rate_encoder_type']} "
+    f"(mlp depth/width={params['encoder_mlp_depth']}/{params['encoder_mlp_width']} if mlp)"
+)
+print(
+    f"Rate decoder: {params['rate_decoder_type']} "
+    f"(mlp depth/width={params['decoder_mlp_depth']}/{params['decoder_mlp_width']} if mlp)"
+)
 print(
     f"Input projection: mode={params['input_proj_mode']}, "
     f"dim={params['input_proj_dim']}, scale={params['input_proj_scale']}"
@@ -196,7 +212,15 @@ if params['input_proj_mode'] == 'random':
 
 # Create GMM with discrete labels (1 to L)
 print("Creating GMM with discrete labels...")
-gmm = GaussianMixtureModel(K=params['K'], D=params['D'], L=params['L'], epsilon=params['epsilon'], seed=params['seed'], offset=params['offset'])
+gmm = GaussianMixtureModel(
+    K=params['K'],
+    D=params['D'],
+    L=params['L'],
+    epsilon=params['epsilon'],
+    seed=params['seed'],
+    offset=params['offset'],
+    equal_norm=params['equal_norm'],
+)
 print(f"  GMM: {params['K']} classes with labels randomly assigned from {{1, ..., {params['L']}}}")
 print(f"  First 10 class labels: {gmm.class_to_label[:min(10, params['K'])].numpy()}")
 
@@ -220,17 +244,24 @@ val_loader = DataLoader(ICLGMMDataset(val_data), batch_size=params['batch_size']
 
 # Create models
 print("\nCreating model...")
-markov_model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['input_proj_dim'],
-                                   L=params['L'], N=params['N'],
-                                   learn_base_rates=params['learn_base_rates'],
-                                   transform_func=params['transform_func'],
-                                   sparsity_rho_edge=params['sparsity_rho_edge'],
-                                   sparsity_rho_all=params['sparsity_rho_all'],
-                                   sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
-                                   base_mask_value=params['base_mask_value'],
-                                   context_scorer_type=params['context_scorer_type'],
-                                   mlp_depth=params['mlp_depth'],
-                                   mlp_width=params['mlp_width'])
+markov_model = MatrixTreeMarkovICL(
+    n_nodes=params['n_nodes'],
+    z_dim=params['input_proj_dim'],
+    L=params['L'],
+    N=params['N'],
+    learn_base_rates=params['learn_base_rates'],
+    transform_func=params['transform_func'],
+    sparsity_rho_edge=params['sparsity_rho_edge'],
+    sparsity_rho_all=params['sparsity_rho_all'],
+    sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
+    base_mask_value=params['base_mask_value'],
+    rate_encoder_type=params['rate_encoder_type'],
+    encoder_mlp_depth=params['encoder_mlp_depth'],
+    encoder_mlp_width=params['encoder_mlp_width'],
+    rate_decoder_type=params['rate_decoder_type'],
+    decoder_mlp_depth=params['decoder_mlp_depth'],
+    decoder_mlp_width=params['decoder_mlp_width'],
+)
 models_to_train = {'markov': markov_model}
 
 if params['add_qk']:

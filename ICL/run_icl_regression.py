@@ -17,84 +17,48 @@ from training_regression import train_model_regression, train_models_joint_regre
 from evaluation_regression import test_regression
 
 
-parser = argparse.ArgumentParser(description="Run Markov ICL regression experiment.")
-parser.add_argument("--param1", type=int, required=True, help="Number of Markov nodes")
-parser.add_argument("--param2", type=int, required=False, default=0, help="Random seed")
-parser.add_argument("--output", type=str, required=True, help="Output directory")
-parser.add_argument("--add_mlp", action="store_true", help="If set, train MLP baseline alongside Markov")
-parser.add_argument(
-    "--context_scorer",
-    type=str,
-    choices=["linear", "mlp"],
-    default="linear",
-    help="Regression head type",
-)
-parser.add_argument(
-    "--mlp_depth",
-    type=int,
-    default=2,
-    help="Depth of MLP regression head (only when --context_scorer mlp)",
-)
-parser.add_argument(
-    "--mlp_width",
-    type=int,
-    default=64,
-    help="Hidden width of MLP regression head (only when --context_scorer mlp)",
-)
-parser.add_argument(
-    "--mlp_baseline_depth",
-    type=int,
-    default=2,
-    help="Depth of MLP baseline scorer when --add_mlp is set",
-)
-parser.add_argument(
-    "--mlp_baseline_width",
-    type=int,
-    default=64,
-    help="Hidden width of MLP baseline scorer when --add_mlp is set",
-)
-parser.add_argument(
-    "--mlp_baseline_dropout",
-    type=float,
-    default=0.0,
-    help="Dropout for MLP baseline scorer when --add_mlp is set",
-)
-parser.add_argument(
-    "--mlp_baseline_activation",
-    type=str,
-    choices=["relu", "gelu", "tanh"],
-    default="relu",
-    help="Activation for MLP baseline scorer when --add_mlp is set",
-)
+# Create argument parser
+parser = argparse.ArgumentParser(description="SLURM job script with arguments.")
+
+# Define command-line arguments
+
+parser.add_argument("--param1", type=int, required=True, help="An integer parameter")
+parser.add_argument("--param2", type=int, required=False, help="An integer parameter")
+parser.add_argument("--param3", type=int, required=False, help="An integer parameter")
+parser.add_argument("--output", type=str, required=True, help="A string parameter")
+
+# Parse arguments
 args = parser.parse_args()
 
 output_dir = args.output
 
 # ============================================================
-# Data parameters
+# Data parameters (defaults from run_icl_local_regression.ipynb)
 # ============================================================
-D = 8
-N = 3
-noise_std = 0.1
+D = args.param2
+N = args.param1
+noise_std = 0.0
 task_scale = 1.0
 y_pad = 0.0
-seed = args.param2
+seed = args.param3
 
 # ============================================================
 # Model parameters
 # ============================================================
-n_nodes = args.param1
-z_dim = D + 1  # x plus y-slot
+n_nodes = 50
+z_dim = D + 1
 transform_func = "exp"
 learn_base_rates = True
-context_scorer_type = args.context_scorer
-mlp_depth = args.mlp_depth
-mlp_width = args.mlp_width
-add_mlp = args.add_mlp
-mlp_baseline_depth = args.mlp_baseline_depth
-mlp_baseline_width = args.mlp_baseline_width
-mlp_baseline_dropout = args.mlp_baseline_dropout
-mlp_baseline_activation = args.mlp_baseline_activation
+context_scorer_type = "linear"
+mlp_depth = 4
+mlp_width = 32
+
+# Notebook: train MLP baseline alongside Markov (no CLI flag)
+add_mlp = True
+mlp_baseline_depth = 4
+mlp_baseline_width = 64
+mlp_baseline_dropout = 0.0
+mlp_baseline_activation = "relu"
 
 # ============================================================
 # Sparsity parameters
@@ -105,12 +69,12 @@ sparsity_rho_edge_base_W = 1.0
 base_mask_value = float("-inf")
 
 # ============================================================
-# Training / inference
+# Training / inference (notebook defaults)
 # ============================================================
-epochs = 1000
+epochs = 200
 lr = 0.0025
 batch_size = 50
-train_samples = 250
+train_samples = 250000
 val_samples = 5000
 method = "direct_solve"
 
@@ -148,12 +112,17 @@ params = {
 print("=" * 70)
 print("MARKOV ICL - REGRESSION")
 print("=" * 70)
-print(f"D={D}, N={N}, nodes={n_nodes}, z_dim={z_dim}")
+print(f"param1=n_nodes={n_nodes}, param2=seed={seed}, param3=D={D}")
+print(f"N={N}, z_dim={z_dim}, noise_std={noise_std}, task_scale={task_scale}")
 print(f"Method: {method}")
-print(f"Regression head: {context_scorer_type} (depth={mlp_depth}, width={mlp_width})")
 print(
-    "Baselines enabled: "
-    f"add_mlp={add_mlp}"
+    f"Markov regression head: {context_scorer_type} "
+    f"(mlp_depth={mlp_depth}, mlp_width={mlp_width})"
+)
+print(
+    f"MLP baseline: add_mlp={add_mlp} "
+    f"(depth={mlp_baseline_depth}, width={mlp_baseline_width}, "
+    f"dropout={mlp_baseline_dropout}, activation={mlp_baseline_activation})"
 )
 print("=" * 70)
 
@@ -194,7 +163,7 @@ val_loader = DataLoader(
     collate_fn=collate_fn_regression,
 )
 
-print("\nCreating model...")
+print("\nCreating model(s)...")
 markov_model = MatrixTreeMarkovICLRegression(
     n_nodes=n_nodes,
     z_dim=z_dim,

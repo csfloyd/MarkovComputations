@@ -2,21 +2,13 @@ import os
 import shutil
 import numpy as np
 
-n_params = 2
+n_params = 3
 run_script = "/project/svaikunt/csfloyd/MarkovComputation/Python/ICL/run_icl.py"
 
-#output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/rho_all_seed_n_nodes5_2/"
-#output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/rho_edge_seed_n_nodes5_nlm0p05/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/rho_all_seed_n_nodes5_nlm_L_6/"
-#output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/n_nodes_N_seed/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/D_Nsamp_seed/"
-#output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/L_epsilon_seed/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/n_nodes_seed_3_max_nobase2/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/n_nodes_rhoall_seed_nt_more/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/nlm_n_nodes_rhoall_seed_f/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/n_nodes_seed_small_softplus_more2/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/wta_2_2_seed/"
-output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/n_nodes_seed_overfit/"
+output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/input_proj_dim_D_seed_qkm_ent/"
+output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/eps_seed_copy/"
+output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/n_nodes_N_seed_mlp-mlp_2/"
+#output_base = "/project/svaikunt/csfloyd/MarkovComputation/DirsICL/N_D_seed_reg6/"
 
 # Define the range of values for param1 and labels for param2
 param1_values = np.arange(0.1, 1.1, 0.1)
@@ -24,23 +16,15 @@ param1_values = np.arange(0.2, 1.2, 0.2)
 param1_values = np.arange(0.0, 1.1, 0.1)
 param1_values = np.arange(0.0, 0.22, 0.02)
 param1_values = [round(s,2) for s in param1_values]
-param1_values = np.arange(1,10,1)
-param2_values = [1,2,3,4,5]
-#param1_values = np.arange(1,16,1)
-#param2_values = np.arange(1,16,1)
-#param1_values = [2, 4, 8, 16, 32]
-#param2_values = [250, 2500, 25000, 250000]
-#param2_values = [250000]
-#param1_values = [4, 8, 16, 32, 64, 128]
-#param2_values = [0.001, 0.75]
 
-#param1_values = [2]
-#param2_values = np.arange(6,16,1)
-#param2_values = np.arange(0,0.22,0.02)
-#param2_values = [round(s,2) for s in param2_values]
-#param3_values = [1,2,3,4,5,6,7,8,9,10]
-#param3_values = np.arange(6,16,1)
-#param1_values = [1,2,3,4,5]
+#param1_values = [64, 128, 256, 512]
+param1_values = np.round(np.arange(0, 0.85, 0.05), 2)
+param2_values = np.arange(1,6,1)
+
+param1_values = [1,2,3,4,5,6,7,8]
+param2_values = [1,2,3,4,5,6,7,8]
+param3_values = [1,2,3,4,5]
+
 
 # SLURM job template
 job_template = """#!/bin/bash

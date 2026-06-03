@@ -11,6 +11,8 @@ from .wta_icl import WinnerTakesAllICL
 from .nonlinear_markov_icl import NonlinearMarkovICL
 from .markov_icl_regression import MatrixTreeMarkovICLRegression
 from .mlp_icl_regression import MLPICLRegression
+from .markov_icl_oddball import MatrixTreeMarkovICLOddball
+from .mlp_icl_oddball import MLPICLOddball
 from .qk_icl import QKICL
 from .mlp_icl import MLPICL
 
@@ -22,6 +24,8 @@ __all__ = [
     'NonlinearMarkovICL',
     'MatrixTreeMarkovICLRegression',
     'MLPICLRegression',
+    'MatrixTreeMarkovICLOddball',
+    'MLPICLOddball',
     'QKICL',
     'MLPICL'
 ]

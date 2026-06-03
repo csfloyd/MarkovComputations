@@ -54,8 +54,10 @@ class MatrixTreeMarkovICLRegression(MatrixTreeMarkovICL):
         )
 
         # Replace classification heads with scalar regression heads.
-        if hasattr(self, "context_scorer"):
-            self.context_scorer = None
+        if "rate_decoder" in self._modules:
+            del self._modules["rate_decoder"]
+        self.rate_decoder = None
+        self.context_scorer = None
         if hasattr(self, "B"):
             self.B = None
 

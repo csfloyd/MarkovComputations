@@ -12,14 +12,21 @@ The Matrix Tree Theorem gives:
 where W^(i) is obtained by deleting row i and column i from W.
 
 Naming convention:
-- K: learnable parameters (K_params) that map context to rate matrix W
-- W: computed rate matrix from K and context
+- Linear rate encoder: K_params maps flattened z to per-edge log-rate shifts.
+- MLP rate encoder: MLP maps z to n_nodes^2 shifts (full connectivity; ignores K sparsity masks).
+- W: computed rate matrix from base rates, encoder modulation, and optional label mod.
+- Rate decoder: maps steady-state π to length-N scores (canonical name); `context_scorer*` kept as aliases.
 """
 
+import os
+import warnings
 import torch
 import torch.nn as nn
 import numpy as np
 from .base_icl_model import BaseICLModel
+
+_LEGACY_DECODER_PREFIX = "context_scorer."
+_CANON_DECODER_PREFIX = "rate_decoder."
 
 
 class MatrixTreeMarkovICL(BaseICLModel):
@@ -37,7 +44,15 @@ class MatrixTreeMarkovICL(BaseICLModel):
                  learn_base_rates=True, transform_func='exp',
                  sparsity_rho_edge=1.0, sparsity_rho_all=1.0,
                  sparsity_rho_edge_base_W=1.0, base_mask_value=0.0,
-                 context_scorer_type='linear', mlp_depth=2, mlp_width=64,
+                 rate_encoder_type='linear',
+                 encoder_mlp_depth=2,
+                 encoder_mlp_width=64,
+                 rate_decoder_type=None,
+                 decoder_mlp_depth=None,
+                 decoder_mlp_width=None,
+                 context_scorer_type='linear',
+                 mlp_depth=None,
+                 mlp_width=None,
                  print_creation=True):
         """
         Initialize Markov ICL model.
@@ -54,9 +69,15 @@ class MatrixTreeMarkovICL(BaseICLModel):
             sparsity_rho_all: Fraction of non-zero elements in per-element mask (all dims)
             sparsity_rho_edge_base_W: Fraction of (i,j) edges with base rates in W
             base_mask_value: Value for masked base rates (0.0 or float('-inf'))
-            context_scorer_type: 'linear' or 'mlp' mapping from steady-state to context scores
-            mlp_depth: Number of linear layers for MLP context scorer (>=2)
-            mlp_width: Hidden width used by MLP context scorer
+            rate_encoder_type: 'linear' (K_params · z) or 'mlp' (dense z → n_nodes² shift)
+            encoder_mlp_depth: MLP layers for rate encoder (>=2) when rate_encoder_type='mlp'
+            encoder_mlp_width: Hidden width for rate encoder MLP
+            rate_decoder_type: 'linear' or 'mlp' (π → context scores). Preferred over context_scorer_type.
+            decoder_mlp_depth: MLP depth for rate decoder (>=2) when rate_decoder_type='mlp'
+            decoder_mlp_width: Hidden width for rate decoder MLP
+            context_scorer_type: Deprecated alias for rate_decoder_type (must agree if both set)
+            mlp_depth: Deprecated alias for decoder_mlp_depth
+            mlp_width: Deprecated alias for decoder_mlp_width
         """
         super().__init__(n_nodes=n_nodes, z_dim=z_dim, L=L, N=N)
         self.n_nodes = n_nodes
@@ -67,11 +88,71 @@ class MatrixTreeMarkovICL(BaseICLModel):
         self.sparsity_rho_edge_base_W = sparsity_rho_edge_base_W
         self.base_mask_value = base_mask_value
         self.learn_base_rates = learn_base_rates
-        self.context_scorer_type = context_scorer_type
-        self.mlp_depth = mlp_depth
-        self.mlp_width = mlp_width
+
+        if rate_decoder_type is not None and context_scorer_type != 'linear':
+            if rate_decoder_type != context_scorer_type:
+                raise ValueError(
+                    "Conflicting rate_decoder_type and context_scorer_type "
+                    f"({rate_decoder_type!r} vs {context_scorer_type!r})"
+                )
+        if rate_decoder_type is not None:
+            rd_type = rate_decoder_type
+        else:
+            rd_type = context_scorer_type
+            if context_scorer_type == 'mlp':
+                warnings.warn(
+                    "context_scorer_type='mlp' is deprecated; use rate_decoder_type='mlp' instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
+        if (
+            decoder_mlp_depth is not None
+            and mlp_depth is not None
+            and decoder_mlp_depth != mlp_depth
+        ):
+            raise ValueError(
+                "Conflicting decoder_mlp_depth and mlp_depth "
+                f"({decoder_mlp_depth} vs {mlp_depth})"
+            )
+        if (
+            decoder_mlp_width is not None
+            and mlp_width is not None
+            and decoder_mlp_width != mlp_width
+        ):
+            raise ValueError(
+                "Conflicting decoder_mlp_width and mlp_width "
+                f"({decoder_mlp_width} vs {mlp_width})"
+            )
+        legacy_mlp_depth = mlp_depth if mlp_depth is not None else 2
+        legacy_mlp_width = mlp_width if mlp_width is not None else 64
+        dd = decoder_mlp_depth if decoder_mlp_depth is not None else legacy_mlp_depth
+        dw = decoder_mlp_width if decoder_mlp_width is not None else legacy_mlp_width
+
+        if rate_encoder_type not in ('linear', 'mlp'):
+            raise ValueError(f"Invalid rate_encoder_type: {rate_encoder_type}")
+        if rd_type not in ('linear', 'mlp'):
+            raise ValueError(
+                f"Invalid rate_decoder_type: {rd_type}. Expected 'linear' or 'mlp'"
+            )
+        if rd_type == 'mlp' and dd < 2:
+            raise ValueError("decoder_mlp_depth must be >= 2 when rate_decoder_type='mlp'")
+        if rate_encoder_type == 'mlp' and encoder_mlp_depth < 2:
+            raise ValueError("encoder_mlp_depth must be >= 2 when rate_encoder_type='mlp'")
+
+        self.rate_encoder_type = rate_encoder_type
+        self.encoder_mlp_depth = encoder_mlp_depth
+        self.encoder_mlp_width = encoder_mlp_width
+        self.rate_decoder_type = rd_type
+        self.decoder_mlp_depth = dd
+        self.decoder_mlp_width = dw
+        # Deprecated mirrors (kept in sync for external code)
+        self.context_scorer_type = rd_type
+        self.mlp_depth = dd
+        self.mlp_width = dw
         
         z_full_dim = (N + 1) * z_dim  # Flatten all context + query
+        self.z_full_dim = z_full_dim
         l_full_dim = N
         
         # Initialize parameters with proper scaling
@@ -79,8 +160,20 @@ class MatrixTreeMarkovICL(BaseICLModel):
         init_scale_B = 0.1 / np.sqrt(N)
         init_base = -2.0 - 0.5 * np.log(n_nodes)
         
-        # Learnable parameters for rate matrix (modulated by z)
-        self.K_params = nn.Parameter(torch.randn(n_nodes, n_nodes, z_full_dim) * init_scale_K)
+        if rate_encoder_type == 'linear':
+            self.K_params = nn.Parameter(
+                torch.randn(n_nodes, n_nodes, z_full_dim) * init_scale_K
+            )
+            self.rate_encoder = None
+        else:
+            self.K_params = None
+            out_dim = n_nodes * n_nodes
+            ed, ew = encoder_mlp_depth, encoder_mlp_width
+            enc_layers = [nn.Linear(z_full_dim, ew), nn.ReLU()]
+            for _ in range(ed - 2):
+                enc_layers.extend([nn.Linear(ew, ew), nn.ReLU()])
+            enc_layers.append(nn.Linear(ew, out_dim))
+            self.rate_encoder = nn.Sequential(*enc_layers)
         
         # Optional: modulate rates by context labels
         if self.use_label_mod:
@@ -90,24 +183,18 @@ class MatrixTreeMarkovICL(BaseICLModel):
         else:
             self.label_modulation = None
         
-        # Context scorer maps steady-state probabilities to context position scores.
-        if context_scorer_type == 'linear':
+        # Rate decoder: steady-state π → context position scores
+        if rd_type == 'linear':
             self.B = nn.Parameter(torch.randn(n_nodes, N) * init_scale_B)
-            self.context_scorer = None
-        elif context_scorer_type == 'mlp':
-            if mlp_depth < 2:
-                raise ValueError("mlp_depth must be >= 2 when context_scorer_type='mlp'")
-            layers = [nn.Linear(n_nodes, mlp_width), nn.ReLU()]
-            for _ in range(mlp_depth - 2):
-                layers.extend([nn.Linear(mlp_width, mlp_width), nn.ReLU()])
-            layers.append(nn.Linear(mlp_width, N))
-            self.context_scorer = nn.Sequential(*layers)
-            self.B = None
+            self.rate_decoder = None
         else:
-            raise ValueError(
-                f"Invalid context_scorer_type: {context_scorer_type}. "
-                "Expected 'linear' or 'mlp'"
-            )
+            layers = [nn.Linear(n_nodes, dw), nn.ReLU()]
+            for _ in range(dd - 2):
+                layers.extend([nn.Linear(dw, dw), nn.ReLU()])
+            layers.append(nn.Linear(dw, N))
+            self.rate_decoder = nn.Sequential(*layers)
+            self.B = None
+        self.context_scorer = self.rate_decoder
         
         # Base log rates for W
         # Note: To get zero base rates, set sparsity_rho_edge_base_W = 0.0 with base_mask_value = 0.0
@@ -116,7 +203,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
         # Set fixed seed for sparsity mask generation (ensures reproducibility across models)
         #torch.manual_seed(42)
         
-        # Create sparsity masks for K_params and base rates
+        # Create sparsity masks for K_params (linear encoder) and base rates
         self._create_sparsity_masks(z_full_dim)
         
         # Set up gradient masking for base rates if learn_base_rates is False
@@ -134,9 +221,15 @@ class MatrixTreeMarkovICL(BaseICLModel):
                 f"attention over {N} context items)")
             print(f"  Label modulation: {self.use_label_mod}")
             print(f"  Base rates learnable: {learn_base_rates}")
-            print(f"  Context scorer: {context_scorer_type}")
-            if context_scorer_type == 'mlp':
-                print(f"  MLP scorer: depth={mlp_depth}, width={mlp_width}, activation=relu")
+            print(f"  Rate encoder: {rate_encoder_type}")
+            if rate_encoder_type == 'mlp':
+                print(
+                    f"  Encoder MLP: depth={encoder_mlp_depth}, width={encoder_mlp_width}, "
+                    "activation=relu"
+                )
+            print(f"  Rate decoder: {rd_type}")
+            if rd_type == 'mlp':
+                print(f"  Decoder MLP: depth={dd}, width={dw}, activation=relu")
             print(f"  Base mask value: {base_mask_value}")
             print(f"  Sparsity K: rho_edge={sparsity_rho_edge:.3f}, rho_all={sparsity_rho_all:.3f}")
             print(f"  Sparsity base_W: rho_edge={sparsity_rho_edge_base_W:.3f}")
@@ -167,6 +260,18 @@ class MatrixTreeMarkovICL(BaseICLModel):
             z_full_dim: Full dimension of z features
         """
         n = self.n_nodes
+
+        if self.rate_encoder_type == 'mlp':
+            # Dense encoder: treat every (i,j) as input-modulated for base-rate mask coupling.
+            k_edge_active = torch.ones(n, n)
+            if self.sparsity_rho_edge_base_W < 1.0:
+                edge_mask_samples_W = torch.rand(n, n)
+                base_mask_W = (edge_mask_samples_W < self.sparsity_rho_edge_base_W).float()
+            else:
+                base_mask_W = torch.ones(n, n)
+            base_mask_W = torch.maximum(base_mask_W, k_edge_active)
+            self.register_buffer('base_log_rates_W_mask', base_mask_W)
+            return
         
         # Per-edge mask: same across all input dimensions
         if self.sparsity_rho_edge < 1.0:
@@ -213,7 +318,8 @@ class MatrixTreeMarkovICL(BaseICLModel):
         """
         Compute the rate matrix W from parameters K where columns sum to zero.
         
-        W[i,j] = exp(base[i,j] + K_params[i,j] · z + label_mod[i,j] · labels) for i≠j
+        Linear encoder: W[i,j] ∝ transform(base + K[i,j]·z + label_mod).
+        MLP encoder: W[i,j] ∝ transform(base + MLP(z)[i,j] + label_mod).
         W[j,j] = -Σ_{k≠j} W[k,j]
         
         Args:
@@ -226,12 +332,12 @@ class MatrixTreeMarkovICL(BaseICLModel):
         batch_size = z_batch.shape[0]
         n = self.n_nodes
         
-        # Apply sparsity mask to K_params
-        K_params_masked = self.K_params * self.K_params_mask
-        
-        # Compute modulation: K_params · z
-        K_expanded = K_params_masked.unsqueeze(0).expand(batch_size, -1, -1, -1)
-        rate_mod = torch.einsum('bijd,bd->bij', K_expanded, z_batch)
+        if self.rate_encoder_type == 'linear':
+            K_params_masked = self.K_params * self.K_params_mask
+            K_expanded = K_params_masked.unsqueeze(0).expand(batch_size, -1, -1, -1)
+            rate_mod = torch.einsum('bijd,bd->bij', K_expanded, z_batch)
+        else:
+            rate_mod = self.rate_encoder(z_batch).view(batch_size, n, n)
         
         # Optional: Add label modulation
         if self.use_label_mod and labels_batch is not None:
@@ -529,10 +635,10 @@ class MatrixTreeMarkovICL(BaseICLModel):
             raise ValueError(f"Invalid method: {method}")
         
         # Compute context position scores from steady-state probabilities.
-        if self.context_scorer_type == 'linear':
+        if self.rate_decoder_type == 'linear':
             q = torch.matmul(p_batch, self.B)  # (batch_size, N)
         else:
-            q = self.context_scorer(p_batch)  # (batch_size, N)
+            q = self.rate_decoder(p_batch)  # (batch_size, N)
         
         # Apply temperature and softmax to get attention over context positions
         attention = torch.softmax(q / temperature, dim=1)  # (batch_size, N)
@@ -553,6 +659,21 @@ class MatrixTreeMarkovICL(BaseICLModel):
         logits = torch.log(logits)
         
         return logits
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Accept checkpoints saved under legacy name ``context_scorer`` for the decoder MLP."""
+        has_new = any(k.startswith(_CANON_DECODER_PREFIX) for k in state_dict)
+        remapped = {}
+        for key, value in state_dict.items():
+            if key.startswith(_LEGACY_DECODER_PREFIX) and not has_new:
+                remapped[
+                    _CANON_DECODER_PREFIX + key[len(_LEGACY_DECODER_PREFIX):]
+                ] = value
+            elif key.startswith(_LEGACY_DECODER_PREFIX) and has_new:
+                continue
+            else:
+                remapped[key] = value
+        return super().load_state_dict(remapped, strict=strict)
     
     def get_sparsity_stats(self):
         """
@@ -561,13 +682,17 @@ class MatrixTreeMarkovICL(BaseICLModel):
         Returns:
             dict with sparsity information for K and base_W, or None if no masks exist
         """
-        if not hasattr(self, 'K_params_mask'):
+        if not hasattr(self, 'base_log_rates_W_mask'):
             return None
         
-        # K_params stats
-        mask_K = self.K_params_mask
-        num_total_K = mask_K.numel()
-        num_active_K = mask_K.sum().item()
+        if self.rate_encoder_type == 'linear':
+            mask_K = self.K_params_mask
+            num_total_K = mask_K.numel()
+            num_active_K = mask_K.sum().item()
+        else:
+            nn = self.n_nodes
+            num_total_K = nn * nn
+            num_active_K = num_total_K
         actual_sparsity_K = 1.0 - (num_active_K / num_total_K)
         
         # base_log_rates_W stats
@@ -596,8 +721,7 @@ class MatrixTreeMarkovICL(BaseICLModel):
         Useful for experiments testing different random masks.
         Resamples masks for K_params and base_log_rates_W.
         """
-        z_full_dim = self.K_params.shape[2]
-        self._create_sparsity_masks(z_full_dim)
+        self._create_sparsity_masks(self.z_full_dim)
         
         # Re-register gradient hooks for base rates if learn_base_rates is True
         if self.learn_base_rates:
@@ -613,17 +737,20 @@ class MatrixTreeMarkovICL(BaseICLModel):
         Returns:
             List of tuples [(i, j), ...] representing active edges
         """
-        if not hasattr(self, 'K_params_mask'):
-            # No mask, all edges are active
+        if self.rate_encoder_type == 'mlp':
             return [(i, j) for i in range(self.n_nodes) for j in range(self.n_nodes)]
         
-        # Sum across z_dim to see which (i,j) pairs have any active params
+        if not hasattr(self, 'K_params_mask'):
+            return [(i, j) for i in range(self.n_nodes) for j in range(self.n_nodes)]
+        
         edge_active = self.K_params_mask.sum(dim=2) > 0  # (n_nodes, n_nodes)
         active_indices = torch.nonzero(edge_active, as_tuple=False)
         
         return [(i.item(), j.item()) for i, j in active_indices]
 
     def get_non_zero_count_K(self):
+        if self.K_params is None:
+            return 0
         K_array = np.array(self.K_params.detach().numpy() * self.K_params_mask.detach().numpy())
         s = K_array.shape
         non_zero_count = 0
@@ -641,24 +768,38 @@ def load_model(params, path, print_creation = True):
     """Load a MarkovICL model from saved weights.
     
     Args:
-        params: Dictionary containing model parameters
-        path: Path to directory containing model.pt file
+        params: Dictionary containing model parameters (as saved by ``run_icl.py``)
+        path: Path to directory containing model.pt file (trailing slash optional)
         
     Returns:
         model: Loaded model in evaluation mode on appropriate device
     """
-    model = MatrixTreeMarkovICL(n_nodes=params['n_nodes'], z_dim=params['D'], 
-                               L=params['L'], N=params['N'], 
-                               learn_base_rates=params['learn_base_rates'],
-                               transform_func=params['transform_func'],
-                               sparsity_rho_edge=params['sparsity_rho_edge'], 
-                               sparsity_rho_all=params['sparsity_rho_all'],
-                               sparsity_rho_edge_base_W=params['sparsity_rho_edge_base_W'],
-                               base_mask_value=params['base_mask_value'],
-                               context_scorer_type=params.get('context_scorer_type', 'linear'),
-                               mlp_depth=params.get('mlp_depth', 2),
-                               mlp_width=params.get('mlp_width', 64),
-                               print_creation=print_creation)
+    if not path.endswith(os.sep):
+        path = path + os.sep
+    z_dim = params.get("input_proj_dim", params["D"])
+    model = MatrixTreeMarkovICL(
+        n_nodes=params["n_nodes"],
+        z_dim=z_dim,
+        L=params["L"],
+        N=params["N"],
+        use_label_mod=params.get("use_label_mod", False),
+        learn_base_rates=params.get("learn_base_rates", True),
+        transform_func=params.get("transform_func", "exp"),
+        sparsity_rho_edge=params.get("sparsity_rho_edge", 1.0),
+        sparsity_rho_all=params.get("sparsity_rho_all", 1.0),
+        sparsity_rho_edge_base_W=params.get("sparsity_rho_edge_base_W", 1.0),
+        base_mask_value=params.get("base_mask_value", 0.0),
+        rate_encoder_type=params.get("rate_encoder_type", "linear"),
+        encoder_mlp_depth=params.get("encoder_mlp_depth", 2),
+        encoder_mlp_width=params.get("encoder_mlp_width", 64),
+        rate_decoder_type=params.get("rate_decoder_type"),
+        decoder_mlp_depth=params.get("decoder_mlp_depth"),
+        decoder_mlp_width=params.get("decoder_mlp_width"),
+        context_scorer_type=params.get("context_scorer_type", "linear"),
+        mlp_depth=params.get("mlp_depth"),
+        mlp_width=params.get("mlp_width"),
+        print_creation=print_creation,
+    )
     
     model_path = path + 'model.pt'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

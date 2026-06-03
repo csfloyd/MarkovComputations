@@ -57,10 +57,26 @@ def apply_context_query_projection(z_context, z_query, K_proj=None, Q_proj=None)
     return z_context, z_query
 
 
+def _sample_novel_class_means(gmm, n_classes_in_context):
+    """
+    Sample episode-specific novel class mean vectors using the same rules as
+    ``GaussianMixtureModel`` (equal_norm sphere, use_offset scaling, or default Gaussians).
+    """
+    D = gmm.D
+    if gmm.equal_norm:
+        raw = torch.randn(n_classes_in_context, D)
+        norms = raw.norm(dim=1, keepdim=True).clamp_min(1e-12)
+        radius = float(gmm.offset) if gmm.use_offset else 1.0
+        return radius * (raw / norms)
+    if gmm.use_offset:
+        return gmm.offset * torch.randn(n_classes_in_context, D) / np.sqrt(D)
+    return torch.randn(n_classes_in_context, D) / np.sqrt(D)
+
+
 class GaussianMixtureModel:
     """Gaussian Mixture Model with K classes for ICL task with DISCRETE labels."""
     
-    def __init__(self, K, D, L=None, epsilon=0.1, seed=None, label_min=0.0, label_max=1.0, offset=1.0, use_offset=False):
+    def __init__(self, K, D, L=None, epsilon=0.1, seed=None, label_min=0.0, label_max=1.0, offset=1.0, use_offset=False, equal_norm=False):
         """
         Initialize Gaussian Mixture Model.
         
@@ -72,6 +88,9 @@ class GaussianMixtureModel:
             seed: Random seed for reproducibility
             label_min: Minimum label value (unused for discrete labels)
             label_max: Maximum label value (unused for discrete labels)
+            equal_norm: If True, all class mean vectors have the same Euclidean norm (random
+                directions). Radius matches the typical scale of the default sampling:
+                1.0 without use_offset, else ``offset``.
         """
         self.K = K
         self.D = D
@@ -81,12 +100,18 @@ class GaussianMixtureModel:
         self.label_max = label_max
         self.offset = offset
         self.use_offset = use_offset
+        self.equal_norm = equal_norm
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
         
         # Sample class means from standard Gaussian scaled by 1/sqrt(D)
-        if use_offset:
+        if equal_norm:
+            raw = torch.randn(K, D)
+            norms = raw.norm(dim=1, keepdim=True).clamp_min(1e-12)
+            radius = float(offset) if use_offset else 1.0
+            self.class_means = radius * (raw / norms)
+        elif use_offset:
             self.class_means = self.offset * torch.randn(K, D) / np.sqrt(D)
         else:
             self.class_means = torch.randn(K, D) / np.sqrt(D)
@@ -142,7 +167,8 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
         gmm: GaussianMixtureModel instance
         n_samples: Number of sequences to generate
         N: Number of context examples
-        novel_classes: If True, create new class means not in GMM
+        novel_classes: If True, create new class means not in GMM (sampled with the same
+            ``equal_norm`` / ``use_offset`` / ``offset`` convention as ``gmm``)
         exact_copy: If True, query is exact copy of a context item
         B: Burstiness - number of repetitions per class in context
         label_min: Unused (kept for backwards compatibility)
@@ -168,7 +194,7 @@ def generate_icl_gmm_data(gmm, n_samples, N, novel_classes=False, exact_copy=Tru
         # Case 1: Use *novel* (unseen) classes
         # ------------------------------------------------------------
         if novel_classes:
-            novel_means = torch.randn(n_classes_in_context, gmm.D) / np.sqrt(gmm.D)
+            novel_means = _sample_novel_class_means(gmm, n_classes_in_context)
             if unique_labels:
                 novel_labels = torch.randperm(K_labels)[:n_classes_in_context].float() + 1
             else:
